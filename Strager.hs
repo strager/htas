@@ -21,7 +21,7 @@ import System.IO
 import Text.Printf
 import Control.Monad.Free (Free(Free, Pure), liftF)
 import Control.Monad.Trans.State (evalState, state)
-import Data.List (permutations)
+import Data.List (nub, permutations)
 
 import HTas.Direct
 import HTas.Low
@@ -82,7 +82,7 @@ main :: IO ()
 main = do
     hSetBuffering stdout NoBuffering
 
-    baseSave <- BS.readFile "pokered_dugtrio2.sav"
+    baseSave <- BS.readFile "pokered_dugtrio3.sav"
 
     gb <- create
     loadRomFile gb "pokered.gbc"
@@ -113,12 +113,12 @@ runSearch gb beginState search = case search of
         putStr message
         runSearch gb beginState continue
     Free (Segment name paths apply continue) -> do
-        printf "%s: Begin\n" name
+        -- printf "%s: Begin\n" name
         goodSegments <- runSegmentPaths paths apply
-        printf "%s: Found %d unique successful paths (from %d input paths)\n" name (Map.size goodSegments) (length paths)
+        -- printf "%s: Found %d unique successful paths (from %d input paths)\n" name (Map.size goodSegments) (length paths)
         outs <- forM (Map.assocs goodSegments) $ \(result, (path, endState))
             -> runSearch gb endState $ continue (path, result)
-        printf "%s: End\n" name
+        -- printf "%s: End\n" name
         return $ concat outs
     Pure x -> return [x]
 
@@ -126,7 +126,10 @@ runSearch gb beginState search = case search of
     runSegmentPaths :: (Ord s) => [a] -> (GB -> IORef Input -> a -> IO (Maybe s)) -> IO (Map s (a, ByteString))
     runSegmentPaths paths apply = do
         resultToPathAndStateRef <- newIORef Map.empty
-        forM_ paths $ \path -> do
+        gen <- newStdGen
+        -- HACK(strager): Make things faster.
+        let paths' = takeRandom 20 paths gen
+        forM_ paths' $ \path -> do
             inputRef <- newIORef mempty
             setInputGetter gb (readIORef inputRef)
             loadState gb beginState
@@ -165,17 +168,27 @@ combinations xs n = mapM (\_ -> xs) [1..n]
 pressAArbitrarily :: [Input] -> [[Input]]
 pressAArbitrarily path = map
     (\aInputs -> zipWith (<>) path aInputs)
-    $ combinations [Input 0, i_A] (length path)
+    $ map (\i -> shuffle (replicate i i_A ++ replicate (length path - i) (Input 0)) (mkStdGen 0)) [0..length path - 1]
+    -- Brute force method: $ combinations [Input 0, i_A] (length path)
+
+-- https://stackoverflow.com/a/29054603/39992
+shuffle :: (RandomGen g) => [a] -> g -> [a]
+shuffle [] _gen = []
+shuffle xs gen =
+    let (randomPosition, gen') = randomR (0, length xs - 1) gen
+        (left, (a:right)) = splitAt randomPosition xs
+    in a : shuffle (left ++ right) gen'
+
+takeRandom :: (RandomGen g) => Int -> [a] -> g -> [a]
+takeRandom n xs gen = take n $ shuffle xs gen
 
 dugtrio :: Search [[Input]]
 dugtrio = do
     let segment1Paths = do
-            basePath <- permutations [i_Right, i_Right, i_Right, i_Up]
+            let basePath = replicate 21 i_Right
             let basePath' = basePath ++ [i_Up]
             let aPaths = pressAArbitrarily basePath'
-            -- Don't press A if we would interact with the
-            -- sign.
-            let aPaths' = filter (\path -> not $ (path !! 0) `hasAllInput` i_Up && (path !! 1) `hasAllInput` i_A) aPaths
+            let aPaths' = aPaths
             aPaths'
     (segment1Path, _) <- segment "Enter Diglett Cave" segment1Paths $ \gb inputRef path -> do
         bufferedWalk gb inputRef path
@@ -183,12 +196,16 @@ dugtrio = do
         return $ Just (last path, rngState)
 
     let segment2Paths = do
-            basePath <- permutations [i_Up, i_Up, i_Right, i_Right]
+            basePath <- nub $ permutations [i_Up, i_Up, i_Right, i_Right]
             let basePath' = i_Up : basePath
             let aPaths = pressAArbitrarily basePath'
             -- Don't press A if we would interact with the
             -- dude.
-            let aPaths' = filter (\path -> not $ (path !! 0) `hasAllInput` i_Up && (path !! 1) `hasAllInput` i_Up && (path !! 2) `hasAllInput` i_A) aPaths
+            let aPaths' = filter (\path -> not $
+                    (path !! 0) `hasAllInput` i_Up &&
+                    (path !! 1) `hasAllInput` i_Up &&
+                    (path !! 2) `hasAllInput` i_Up &&
+                    (path !! 3) `hasAllInput` i_A) aPaths
             aPaths'
     (segment2Path, _) <- segment "Climb ladder" segment2Paths $ \gb inputRef path -> do
         bufferedWalk gb inputRef path
@@ -204,20 +221,11 @@ dugtrio = do
         encountered <- (/= 0) <$> cpuRead gb wIsInBattle
         if encountered
         then do
-            advanceUntil gb ((/= 0) <$> cpuRead gb wIsInBattle)
-            species <- cpuRead gb wEnemyMonSpecies
-            level <- cpuRead gb wEnemyMonLevel
-            dv1 <- cpuRead gb wEnemyMonAtkDefDV
-            dv2 <- cpuRead gb wEnemyMonSpdSpcDV
-            --print (species, level, dv1, dv2)
-            {-
-            if species == 118 && level == 31
-            then return $ Just (dv1, dv2)
-            else return Nothing
-            -}
-            return $ Just (species, level, dv1, dv2)
-        else do
-            return Nothing
+            encounter <- readEncounter gb
+            return $ if species encounter == 118 && level encounter == 31
+                then Just encounter
+                else Nothing
+        else return Nothing
     log $ printf "Found encounter: %s\n - %s\n - %s\n - %s\n" (show encounter) (show segment1Path) (show segment2Path) (show segment3Path)
 
     -- TODO(strager): Return something useful.
@@ -228,98 +236,6 @@ randomOf xs gen = (xs !! index, gen')
     where
     (index, gen') = randomR (0, length xs - 1) gen
 
-{-
-dugtrioSegments :: [GB -> IORef Input -> Segment StateGroup [Input]]
-dugtrioSegments =
-    [ \gb inputRef ->
-      let
-        paths = Vector.map (++ [i_Up]) $ enumeratePaths i_Right i_Up 0 4 [(0, 4)]
-      in Segment
-        { generate = selectRandom paths
-        , apply = \path stateGroup -> do
-            --printf "Segment 1: %s to %d states\n" (show path) (length stateGroup)
-            resultStates <- for stateGroup $ \state -> do
-                loadState gb state
-                bufferedWalk gb inputRef path
-                saveState gb
-            pure (resultStates, fromIntegral (length resultStates))
-        }
-    , \gb inputRef ->
-      let
-        paths = enumeratePaths i_Up i_Right 0 5 [(1, 5)]
-      in Segment
-        { generate = selectRandom paths
-        , apply = \path stateGroup -> do
-            --printf "Segment 2: %s to %d states\n" (show path) (length stateGroup)
-            resultStates <- for stateGroup $ \state -> do
-                loadState gb state
-                bufferedWalk gb inputRef path
-                saveState gb
-            pure (resultStates, fromIntegral (length resultStates))
-        }
-    , \gb inputRef -> Segment
-        { generate = do
-            selectRandom paths
-        , apply = \path stateGroup -> do
-            printf "Segment 3: %s to %d states\n" (show path) (length stateGroup)
-            resultMaybeStates <- for stateGroup $ \state -> do
-                loadState gb state
-
-                bufferedWalk gb inputRef path
-                encountered <- (/= 0) <$> cpuRead gb wIsInBattle
-                if encountered
-                then do
-                    advanceUntil gb ((/= 0) <$> cpuRead gb wIsInBattle)
-                    species <- cpuRead gb wEnemyMonSpecies
-                    level <- cpuRead gb wEnemyMonLevel
-                    print (species, level)
-                    if species == 118 && level == 31
-                    then Just <$> saveState gb
-                    else pure Nothing
-                else pure Nothing
-            let resultStates = catMaybes resultMaybeStates
-            pure $ (resultStates, fromIntegral (length resultStates))
-        }
-    ]
-
-launchSearch :: [GB -> IORef Input -> Segment StateGroup [Input]] -> StateGroup -> IO ()
-launchSearch segs initialStates = do
-    initialIORef <- newIORef (Just (Checkpoint
-        { revPaths = []
-        , currentState = initialStates
-        , value = 60
-        }))
-    lock <- newMVar ()
-    launchLoop segs initialIORef lock
-    where
-    launchLoop segs sourceRef lock = do
-        case segs of
-            [] -> pure ()
-            s:ss -> do
-                targetRef <- newIORef Nothing
-
-                gb <- create
-                loadRomFile gb "pokered.gbc"
-                inputRef <- newIORef mempty
-                setInputGetter gb (readIORef inputRef)
-
-                forkIO . forever $ do
-                    segmentStep (s gb inputRef) sourceRef targetRef $ \check -> do
-                        withMVar lock $ \_ -> do
-                            pure ()
-                            --printf "Segment %d\tValue %f\n" (length (revPaths check)) (value check)
-                        {-
-                        when (length ss == 1 && value check > 20) $ do
-                            let description = printf "Value %f\t%s\n" (value check) (show . reverse $ revPaths check)
-                            appendFile "almost_paths.txt" description
-                        -}
-                        when (length ss == 0 {- && value check > 20 -}) $ do
-                            let description = printf "Value %f\t%s\n" (value check) (show . reverse $ revPaths check)
-                            appendFile "complete_paths.txt" description
-                    threadDelay 10000
-                launchLoop ss targetRef lock
--}
-
 setSaveFrames :: Word8 -> ByteString -> ByteString
 setSaveFrames f dat =
     let dat' = editByte saveTimeFrames f dat
@@ -328,11 +244,28 @@ setSaveFrames f dat =
     in
     dat''
 
-getEncounterData :: GB -> IO (Word8, Word8, Word8, Word8)
-getEncounterData gb = do
+data Encounter = Encounter
+    { species :: Word8
+    , level :: Word8
+    , attackDV :: Word8
+    , defenseDV :: Word8
+    , speedDV :: Word8
+    , specialDV :: Word8
+    }
+    deriving (Eq, Ord, Show)
+
+readEncounter :: GB -> IO Encounter
+readEncounter gb = do
     advanceUntil gb ((/= 0) <$> cpuRead gb wIsInBattle)
     species <- cpuRead gb wEnemyMonSpecies
     level <- cpuRead gb wEnemyMonLevel
     dv1 <- cpuRead gb wEnemyMonAtkDefDV
     dv2 <- cpuRead gb wEnemyMonSpdSpcDV
-    pure $ (species, level, dv1, dv2)
+    return Encounter
+        { species = species
+        , level = level
+        , attackDV = (dv1 `shiftR` 4) .&. 0xF
+        , defenseDV = dv1 .&. 0xF
+        , speedDV = (dv2 `shiftR` 4) .&. 0xF
+        , specialDV = dv2 .&. 0xF
+        }
