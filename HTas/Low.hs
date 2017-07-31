@@ -7,6 +7,7 @@ import Control.Monad
 import Data.Bits
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.List (intercalate)
 import Foreign hiding (void)
 import Foreign.C.Types
 import HTas.Direct
@@ -250,11 +251,33 @@ loadSaveFile gb path = do
     loadSaveData gb dat
 
 newtype Input = Input Word8
-    deriving (Eq, Show, Ord)
+    deriving (Eq, Ord)
 
 instance Monoid Input where
     mempty = Input 0
     mappend (Input a) (Input b) = Input (a .|. b)
+
+hasAllInput :: Input -> Input -> Bool
+hasAllInput (Input x) (Input y) = (x .&. y) == y
+
+instance Show Input where
+  show input = intercalate "<>" words
+    where
+    words
+      = consWord i_Down "i_Down"
+      $ consWord i_Up "i_Up"
+      $ consWord i_Left "i_Left"
+      $ consWord i_Right "i_Right"
+      $ consWord i_Start "i_Start"
+      $ consWord i_Select "i_Select"
+      $ consWord i_B "i_B"
+      $ consWord i_A "i_A"
+      $ []
+
+    consWord :: Input -> String -> [String] -> [String]
+    consWord wordInput word words
+      | input `hasAllInput` wordInput = word : words
+      | otherwise = words
 
 i_Down :: Input
 i_Down = Input 0x80
