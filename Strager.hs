@@ -21,6 +21,7 @@ import System.IO
 import Text.Printf
 import Control.Monad.Free (Free(Free, Pure), liftF)
 import Control.Monad.Trans.State (evalState, state)
+import Data.List (permutations)
 
 import HTas.Direct
 import HTas.Low
@@ -29,7 +30,7 @@ import Red.Battle
 import Red.Intro
 import Red.Overworld
 import Red.Save
-import Search
+--import Search
 --import MoonManip
 
 import Data.ByteString (ByteString)
@@ -43,7 +44,7 @@ import System.Random
 import Text.Printf
 
 import Red.Battle
-import Search
+--import Search
 import HTas.Direct
 import HTas.Low
 
@@ -74,7 +75,7 @@ import Red.Battle
 import Red.Intro
 import Red.Overworld
 import Red.Save
-import Search
+--import Search
 --import MoonManip
 
 main :: IO ()
@@ -88,7 +89,7 @@ main = do
 
     beginState <- saveState gb
     _paths <- runSearch gb beginState $ do
-        (frame, _) <- runSegment [0] $ \gb _inputRef frame -> do
+        (frame, _) <- segment "IGT frame" [0] $ \gb _inputRef frame -> do
             loadSaveData gb (setSaveFrames frame baseSave)
             reset gb
             doOptimalIntro gb
@@ -98,11 +99,11 @@ main = do
 
 data SearchDSL f where
     Log :: String -> f -> SearchDSL f
-    RunSegment :: (Eq s) => [a] -> (GB -> IORef Input -> a -> IO (Maybe s)) -> ((a, s) -> f) -> SearchDSL f
+    Segment :: (Ord s) => String -> [a] -> (GB -> IORef Input -> a -> IO (Maybe s)) -> ((a, s) -> f) -> SearchDSL f
 
 instance Functor SearchDSL where
     fmap f (Log message continue) = Log message (f continue)
-    fmap f (RunSegment queue apply continue) = RunSegment queue apply (f . continue)
+    fmap f (Segment name paths apply continue) = Segment name paths apply (f . continue)
 
 type Search = Free SearchDSL
 
@@ -111,50 +112,94 @@ runSearch gb beginState search = case search of
     Free (Log message continue) -> do
         putStr message
         runSearch gb beginState continue
-    Free (RunSegment queue apply continue) -> do
-        ass <- forM queue $ \path -> do
-            inputRef <- newIORef mempty
-            setInputGetter gb (readIORef inputRef)
-            loadSaveData gb beginState
-            maybeResult <- apply gb inputRef path
-            case maybeResult of
-                -- TODO(strager): Dedupe paths based on result.
-                -- TODO(strager): Breadth-first search.
-                Just result -> do
-                    endState <- saveState gb
-                    runSearch gb endState $ continue (path, result)
-                Nothing -> return []
-        return $ concat ass
+    Free (Segment name paths apply continue) -> do
+        printf "%s: Begin\n" name
+        goodSegments <- runSegmentPaths paths apply
+        printf "%s: Found %d unique successful paths (from %d input paths)\n" name (Map.size goodSegments) (length paths)
+        outs <- forM (Map.assocs goodSegments) $ \(result, (path, endState))
+            -> runSearch gb endState $ continue (path, result)
+        printf "%s: End\n" name
+        return $ concat outs
     Pure x -> return [x]
 
-runSegment :: (Eq s) => [a] -> (GB -> IORef Input -> a -> IO (Maybe s)) -> Search (a, s)
-runSegment queue apply = liftF $ RunSegment queue apply id
+    where
+    runSegmentPaths :: (Ord s) => [a] -> (GB -> IORef Input -> a -> IO (Maybe s)) -> IO (Map s (a, ByteString))
+    runSegmentPaths paths apply = do
+        resultToPathAndStateRef <- newIORef Map.empty
+        forM_ paths $ \path -> do
+            inputRef <- newIORef mempty
+            setInputGetter gb (readIORef inputRef)
+            loadState gb beginState
+            printf "."
+            maybeResult <- apply gb inputRef path
+            case maybeResult of
+                Just result -> do
+                    s <- readIORef resultToPathAndStateRef
+                    -- TODO(strager): Evaluate cost and pick
+                    -- the cheaper version.
+                    let shouldInsert = result `Map.notMember` s
+                    when shouldInsert $ do
+                        endState <- saveState gb
+                        writeIORef resultToPathAndStateRef (Map.insert result (path, endState) s)
+                    return ()
+                Nothing -> return ()
+        printf "\n"
+        readIORef resultToPathAndStateRef
+
+segment :: (Ord s) => String -> [a] -> (GB -> IORef Input -> a -> IO (Maybe s)) -> Search (a, s)
+segment name paths apply = liftF $ Segment name paths apply id
 
 log :: String -> Search ()
 log message = liftF $ Log message ()
 
+readRNGState :: GB -> IO (Word8, Word8, Word8)
+readRNGState gb = do
+    add <- cpuRead gb 0xFFD3
+    sub <- cpuRead gb 0xFFD4
+    div <- cpuRead gb 0xFF04
+    return (add, sub, div)
+
+combinations :: [a] -> Int -> [[a]]
+combinations xs n = mapM (\_ -> xs) [1..n]
+
+pressAArbitrarily :: [Input] -> [[Input]]
+pressAArbitrarily path = map
+    (\aInputs -> zipWith (<>) path aInputs)
+    $ combinations [Input 0, i_A] (length path)
+
 dugtrio :: Search [[Input]]
 dugtrio = do
-    let segment1Paths = [[i_Right, i_Right, i_Right, i_Up, i_Up]]
-    (segment1Path, _) <- runSegment segment1Paths $ \gb inputRef path -> do
+    let segment1Paths = do
+            basePath <- permutations [i_Right, i_Right, i_Right, i_Up]
+            let basePath' = basePath ++ [i_Up]
+            let aPaths = pressAArbitrarily basePath'
+            -- Don't press A if we would interact with the
+            -- sign.
+            let aPaths' = filter (\path -> not $ (path !! 0) `hasAllInput` i_Up && (path !! 1) `hasAllInput` i_A) aPaths
+            aPaths'
+    (segment1Path, _) <- segment "Enter Diglett Cave" segment1Paths $ \gb inputRef path -> do
         bufferedWalk gb inputRef path
-        -- TODO(strager)
-        return $ Just (0 :: Word8, 0 :: Word8)
-    log $ printf "Segment 1: %s\n" (show segment1Path)
+        rngState <- readRNGState gb
+        return $ Just (last path, rngState)
 
-    let segment2Paths = [[i_Up, i_Up, i_Up, i_Right, i_Right]]
-    (segment2Path, _) <- runSegment segment2Paths $ \gb inputRef path -> do
+    let segment2Paths = do
+            basePath <- permutations [i_Up, i_Up, i_Right, i_Right]
+            let basePath' = i_Up : basePath
+            let aPaths = pressAArbitrarily basePath'
+            -- Don't press A if we would interact with the
+            -- dude.
+            let aPaths' = filter (\path -> not $ (path !! 0) `hasAllInput` i_Up && (path !! 1) `hasAllInput` i_Up && (path !! 2) `hasAllInput` i_A) aPaths
+            aPaths'
+    (segment2Path, _) <- segment "Climb ladder" segment2Paths $ \gb inputRef path -> do
         bufferedWalk gb inputRef path
-        -- TODO(strager)
-        return $ Just (0 :: Word8, 0 :: Word8)
-    log $ printf "Segment 2: %s\n" (show segment2Path)
+        rngState <- readRNGState gb
+        return $ Just (last path, rngState)
 
     let segment3Paths = flip map [0 :: Int .. 100 :: Int] $ \seed ->
-            flip evalState (mkStdGen seed) $ do
+            i_Left : (flip evalState (mkStdGen seed) $ do
                 forM [0..20] $ \_ ->
-                    state $ randomOf [i_Up, i_Down, i_Left, i_Right]
-    (segment3Path, _) <- runSegment segment3Paths $ \gb inputRef path -> do
-        print path
+                    state $ randomOf [i_Up, i_Down, i_Left, i_Up <> i_A, i_Down <> i_A, i_Left <> i_A])
+    (segment3Path, encounter) <- segment "Encounter Dugtrio" segment3Paths $ \gb inputRef path -> do
         bufferedWalk gb inputRef path
         encountered <- (/= 0) <$> cpuRead gb wIsInBattle
         if encountered
@@ -162,16 +207,21 @@ dugtrio = do
             advanceUntil gb ((/= 0) <$> cpuRead gb wIsInBattle)
             species <- cpuRead gb wEnemyMonSpecies
             level <- cpuRead gb wEnemyMonLevel
-            print (species, level)
+            dv1 <- cpuRead gb wEnemyMonAtkDefDV
+            dv2 <- cpuRead gb wEnemyMonSpdSpcDV
+            --print (species, level, dv1, dv2)
+            {-
             if species == 118 && level == 31
-            then return $ Just ()
+            then return $ Just (dv1, dv2)
             else return Nothing
+            -}
+            return $ Just (species, level, dv1, dv2)
         else do
-            putStrLn "no encounter"
             return Nothing
-    log $ printf "Segment 3: %s\n" (show segment3Path)
+    log $ printf "Found encounter: %s\n - %s\n - %s\n - %s\n" (show encounter) (show segment1Path) (show segment2Path) (show segment3Path)
 
-    return [segment1Path, segment2Path, segment3Path]
+    -- TODO(strager): Return something useful.
+    return []
 
 randomOf :: (RandomGen g) => [a] -> g -> (a, g)
 randomOf xs gen = (xs !! index, gen')
