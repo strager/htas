@@ -1,5 +1,7 @@
 module Red.Overworld where
 
+import Control.Monad (unless)
+import Data.Bits ((.&.))
 import Data.IORef
 import Data.Word
 import HTas.Low
@@ -50,7 +52,8 @@ bufferedWalk gb inRef inps =
     waitForWalkStart gb = do
         count <- cpuRead gb wWalkCounter
         inBattle <- cpuRead gb wIsInBattle
-        if count == 7 || inBattle /= 0
+        bonked <- (== 0xB4) <$> cpuRead gb 0xC02A
+        if count == 7 || inBattle /= 0 || bonked
         then pure ()
         else do
             advanceFrame gb
