@@ -128,7 +128,7 @@ runSearch gb beginState search = case search of
         resultToPathAndStateRef <- newIORef Map.empty
         gen <- newStdGen
         -- HACK(strager): Make things faster.
-        let paths' = takeRandom 20 paths gen
+        let paths' = takeRandom 30 paths gen
         forM_ paths' $ \path -> do
             inputRef <- newIORef mempty
             setInputGetter gb (readIORef inputRef)
@@ -168,7 +168,7 @@ combinations xs n = mapM (\_ -> xs) [1..n]
 pressAArbitrarily :: [Input] -> [[Input]]
 pressAArbitrarily path = map
     (\aInputs -> zipWith (<>) path aInputs)
-    $ map (\i -> shuffle (replicate i i_A ++ replicate (length path - i) (Input 0)) (mkStdGen 0)) [0..length path - 1]
+    $ map (\i -> shuffle (replicate i i_A ++ replicate (length path - i) (Input 0)) (mkStdGen 0)) [0..(length path `div` 2)]
     -- Brute force method: $ combinations [Input 0, i_A] (length path)
 
 -- https://stackoverflow.com/a/29054603/39992
