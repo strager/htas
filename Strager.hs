@@ -1,18 +1,20 @@
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 
 module Main where
 
+import Control.Monad.IO.Class (MonadIO(liftIO))
 import Prelude hiding (log)
 import Control.Monad
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import Data.Foldable
+import Data.Foldable (asum)
+import Control.Applicative (Alternative(..))
 import Data.IORef
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe
 import Data.Monoid
-import Data.Traversable
 import Data.Vector (Vector)
 import qualified Data.Vector as Vector
 import Foreign
@@ -43,7 +45,6 @@ import Data.ByteString (ByteString)
 import Data.IORef
 import Data.Maybe
 import Data.Monoid
-import Data.Traversable
 import Data.Vector (Vector)
 import qualified Data.Vector as Vector
 import System.Random
@@ -66,7 +67,6 @@ import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe
 import Data.Monoid
-import Data.Traversable
 import Data.Vector (Vector)
 import qualified Data.Vector as Vector
 import Foreign
@@ -84,16 +84,31 @@ import Red.Save
 --import Search
 --import MoonManip
 
+for :: [a] -> (a -> b) -> [b]
+for = flip map
+
 main :: IO ()
 main = do
-    baseSave <- BS.readFile "pokered_dugtrio3.sav"
+    baseSave <- BS.readFile "pokered_dugtrio3_2stepscloser.sav"
 
+{-
     _paths <- runSearch newGB $ do
         (frame, _) <- segment "IGT frame" [0] $ \gb _inputRef frame -> do
             loadSaveData gb (setSaveFrames frame baseSave)
             reset gb
             doOptimalIntro gb
             return $ Just ()
+        dugtrio
+    return ()
+-}
+
+    runSearch newGB checkpointer $ do
+        _frame <- asum $ for [0] $ \frame -> do
+            gb <- getGameboy
+            liftIO $ loadSaveData gb (setSaveFrames frame baseSave)
+            liftIO $ reset gb
+            liftIO $ doOptimalIntro gb
+            checkpoint
         dugtrio
     return ()
 
@@ -104,6 +119,204 @@ main = do
         loadRomFile gb "pokered.gbc"
         return gb
 
+    checkpointer :: GB -> IO RedCheckpoint
+    checkpointer gb = do
+        encountered <- (/= 0) <$> cpuRead gb wIsInBattle
+        encounter <- if encountered
+            then Just <$> readEncounter gb
+            else return Nothing
+        rngState <- readRNGState gb
+        return RedCheckpoint
+            { checkpointEncounter = encounter
+            , checkpointRNGState = rngState
+            }
+
+data RedCheckpoint = RedCheckpoint
+    { checkpointEncounter :: Maybe Encounter
+    , checkpointRNGState :: (Word8, Word8, Word8)
+    -- TODO(strager): In-game timer.
+    }
+    deriving (Eq, Ord)
+
+prune :: Search a
+prune = empty
+
+dugtrio :: Search ()
+dugtrio = do
+    -- TODO(strager): Prune if we're not at the expected
+    -- location.
+
+    let segment1Paths = pressAArbitrarily $ replicate 19 i_Right ++ [i_Up]
+    segment1Path <- asum $ (for segment1Paths $ ((\path -> do
+        gb <- getGameboy
+        inputRef <- liftIO $ newIORef mempty
+        liftIO $ setInputGetter gb (readIORef inputRef)
+        forM_ path $ \step -> do
+            liftIO $ bufferedStep gb inputRef step
+            encountered <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
+            when encountered prune
+            -- TODO(strager): Prune if we're not at the
+            -- expected location.
+            checkpoint
+        return path) :: [Input] -> Search [Input]) :: [Search [Input]])
+
+    let segment2Paths = do
+            basePath <- concat
+              [ map (i_Up :) $ nub $ permutations [i_Up, i_Up, i_Right, i_Right]
+              , map (\path -> i_Right : i_Up : path) $ nub $ permutations [i_Up, i_Up, i_Right]
+              ]
+            let aPaths = pressAArbitrarily basePath
+            -- Don't press A if we would interact with the
+            -- dude.
+            let aPaths' = filter (\path -> not $
+                    (path !! 0) `hasAllInput` i_Up &&
+                    (path !! 1) `hasAllInput` i_Up &&
+                    (path !! 2) `hasAllInput` i_Up &&
+                    (path !! 3) `hasAllInput` i_A) aPaths
+            aPaths'
+    segment2Path <- asum $ for segment2Paths $ \path -> do
+        gb <- getGameboy
+        inputRef <- liftIO $ newIORef mempty
+        liftIO $ setInputGetter gb (readIORef inputRef)
+        forM_ path $ \step -> do
+            liftIO $ bufferedStep gb inputRef step
+            encountered <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
+            when encountered prune
+            -- TODO(strager): Prune if we're not at the
+            -- expected location.
+            checkpoint
+        return path
+
+    let segment3Paths = flip map [0 :: Int .. 1 :: Int] $ \seed ->
+            i_Left : (flip evalState (mkStdGen seed) $ do
+                forM [0..8] $ \_ ->
+                    state $ randomOf [i_Up, i_Down, i_Left, i_Up <> i_A, i_Down <> i_A, i_Left <> i_A])
+    (segment3Path, encounter) <- asum $ for segment3Paths $ \path -> do
+        gb <- getGameboy
+        inputRef <- liftIO $ newIORef mempty
+        liftIO $ setInputGetter gb (readIORef inputRef)
+        let runPathUntilEncounter [] = return ()
+            runPathUntilEncounter (step:rest) = do
+                encountered <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
+                unless encountered $ do
+                    liftIO $ bufferedStep gb inputRef step
+                    checkpoint
+                    runPathUntilEncounter rest
+        runPathUntilEncounter path
+        encountered <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
+        unless encountered prune
+        checkpoint
+        encounter <- liftIO $ readEncounter gb
+        liftIO $ print encounter
+        return (path, encounter)
+
+    log $ printf "Found encounter: %s\n - %s\n - %s\n - %s\n" (show encounter) (show segment1Path) (show segment2Path) (show segment3Path)
+
+{-
+data SearchDSL f where
+    Alternative :: f -> f -> (a -> f) -> SearchDSL f
+    Checkpoint :: f -> SearchDSL f
+    GetGameboy :: (GB -> f) -> SearchDSL f
+    Empty :: SearchDSL f
+    LiftIO :: IO a -> (a -> f) -> SearchDSL f
+    Log :: String -> f -> SearchDSL f
+
+instance Functor SearchDSL where
+    fmap f (Alternative x y continue) = Alternative (f x) (f y) (\r -> f (continue r))
+    fmap f (Checkpoint continue) = Checkpoint (f continue)
+    fmap f (GetGameboy continue) = GetGameboy (\gb -> f (continue gb))
+    fmap f Empty = Empty
+    fmap f (LiftIO io continue) = LiftIO io (\x -> f (continue x))
+    fmap f (Log message continue) = Log message (f continue)
+-}
+
+data Search a where
+    Alternative :: Search a -> Search a -> Search a
+    Bind :: Search a -> (a -> Search b) -> Search b
+    Checkpoint :: Search ()
+    Empty :: Search a
+    LiftIO :: IO a -> Search a
+    Log :: String -> Search ()
+    Pure :: a -> Search a
+
+instance Functor Search where
+    fmap f search = Bind search (\x -> Pure (f x))
+    {-
+    fmap f (Alternative x y) = Alternative (fmap f x) (fmap f y)
+    fmap f (Bind search continue) = Bind (fmap f search) (\x -> fmap search continue)
+    -}
+
+instance Monad Search where
+    return x = Pure x
+    search >>= continue = Bind search continue
+
+{-
+instance {-# OVERLAPPING #-} Alternative (Free SearchDSL) where
+    empty = liftF Empty
+    x <|> y = liftF $ Alternative x y id
+-- -}
+{-
+instance Alternative SearchDSL where
+    empty = Empty
+    x <|> y = Alternative x y id
+-- -}
+
+{-
+instance MonadIO (Free SearchDSL) where
+    liftIO io = liftF $ LiftIO io id
+-}
+
+--type Search = Free SearchDSL
+
+-- TODO(strager)
+type Cost = ()
+
+type GBState = ByteString
+
+type Checkpointer c = GB -> IO c
+
+runSearch :: (Eq c, Ord c) => IO GB -> Checkpointer c -> Search a -> IO [a]
+runSearch newGB checkpointer search = do
+    gb <- newGB
+    checkpointsRef <- newIORef (Map.empty :: Map c (Cost, GBState))
+    let runSearch' :: Search a -> IO [a]
+        runSearch' (Free (Alternative x y continue)) = do
+            beforeState <- saveState gb
+            xs <- runSearch' (liftF x >>= continue)
+            loadState gb beforeState
+            ys <- runSearch' (liftF y >>= continue)
+            return (xs ++ ys)
+        runSearch' (Free (Checkpoint continue)) = do
+            checkpoint <- checkpointer gb
+            checkpoints <- readIORef checkpointsRef
+            let isCheckpointNew = case Map.lookup checkpoint checkpoints of
+                    Nothing -> True
+                    Just (_cost, _state) -> False -- TODO(strager): Pick the solution with the lower cost.
+            if isCheckpointNew
+            then do
+                let cost = () -- TODO(strager)
+                state <- saveState gb
+                writeIORef checkpointsRef $ Map.insert checkpoint (cost, state)
+                -- TODO(strager): Breadth-first search.
+                runSearch' continue
+            else return () -- Prune.
+        runSearch' (Free (GetGameboy continue)) = continue gb
+        runSearch' (Free Empty) = return ()
+        runSearch' (Free (Log message continue)) = do
+            hPutStr stderr message
+            runSearch' continue
+    runSearch' search
+
+checkpoint :: Search ()
+checkpoint = liftF $ Checkpoint ()
+
+getGameboy :: Search GB
+getGameboy = liftF $ GetGameboy id
+
+log :: String -> Search ()
+log message = liftF $ Log message ()
+
+{-
 data SearchDSL f where
     Log :: String -> f -> SearchDSL f
     Segment :: (Ord s) => String -> [a] -> (GB -> IORef Input -> a -> IO (Maybe s)) -> ((a, s) -> f) -> SearchDSL f
@@ -145,12 +358,12 @@ runSearch newGB search = do
                 log logMutex message
                 runSearch'' maybeBeginState continue
             Free (Segment name paths apply continue) -> do
-                -- log $ printf "%s: Begin\n" name
+                -- log logMutex $ printf "%s: Begin\n" name
                 goodSegments <- runSegmentPaths maybeBeginState paths apply
-                -- log $ printf "%s: Found %d unique successful paths (from %d input paths)\n" name (Map.size goodSegments) (length paths)
+                log logMutex $ printf "%s: Found %d unique successful paths (from %d input paths)\n" name (Map.size goodSegments) (length paths)
                 outs <- forConcurrently (Map.assocs goodSegments) $ \(result, (path, endState))
                     -> runSearch'' (Just endState) $ continue (path, result)
-                -- putStrLn stderr $ printf "%s: End\n" name
+                -- log logMutex $ printf "%s: End\n" name
                 return $ concat outs
             Pure x -> return [x]
 
@@ -158,9 +371,7 @@ runSearch newGB search = do
         runSegmentPaths maybeBeginState paths apply = do
             resultsVar <- atomically $ newTVar Map.empty
             gen <- newStdGen
-            -- HACK(strager): Make things faster.
-            let paths' = takeRandom 30 paths gen
-            forConcurrently paths' $ \path -> bracket
+            forConcurrently paths $ \path -> bracket
                 (atomically $ readTChan gbChan)
                 (\gb -> atomically $ writeTChan gbChan gb)
                 $ \gb -> do
@@ -194,29 +405,8 @@ segment name paths apply = liftF $ Segment name paths apply id
 log :: String -> Search ()
 log message = liftF $ Log message ()
 
-readRNGState :: GB -> IO (Word8, Word8, Word8)
-readRNGState gb = do
-    add <- cpuRead gb 0xFFD3
-    sub <- cpuRead gb 0xFFD4
-    div <- cpuRead gb 0xFF04
-    return (add, sub, div)
-
 combinations :: [a] -> Int -> [[a]]
 combinations xs n = mapM (\_ -> xs) [1..n]
-
-pressAArbitrarily :: [Input] -> [[Input]]
-pressAArbitrarily path = map
-    (\aInputs -> zipWith (<>) path aInputs)
-    $ map (\i -> shuffle (replicate i i_A ++ replicate (length path - i) (Input 0)) (mkStdGen 0)) [0..(length path `div` 2)]
-    -- Brute force method: $ combinations [Input 0, i_A] (length path)
-
--- https://stackoverflow.com/a/29054603/39992
-shuffle :: (RandomGen g) => [a] -> g -> [a]
-shuffle [] _gen = []
-shuffle xs gen =
-    let (randomPosition, gen') = randomR (0, length xs - 1) gen
-        (left, (a:right)) = splitAt randomPosition xs
-    in a : shuffle (left ++ right) gen'
 
 takeRandom :: (RandomGen g) => Int -> [a] -> g -> [a]
 takeRandom n xs gen = take n $ shuffle xs gen
@@ -224,7 +414,7 @@ takeRandom n xs gen = take n $ shuffle xs gen
 dugtrio :: Search [[Input]]
 dugtrio = do
     let segment1Paths = do
-            let basePath = replicate 21 i_Right
+            let basePath = replicate 19 i_Right
             let basePath' = basePath ++ [i_Up]
             let aPaths = pressAArbitrarily basePath'
             let aPaths' = aPaths
@@ -255,7 +445,7 @@ dugtrio = do
 
     let segment3Paths = flip map [0 :: Int .. 100 :: Int] $ \seed ->
             i_Left : (flip evalState (mkStdGen seed) $ do
-                forM [0..20] $ \_ ->
+                forM [0..8] $ \_ ->
                     state $ randomOf [i_Up, i_Down, i_Left, i_Up <> i_A, i_Down <> i_A, i_Left <> i_A])
     (segment3Path, encounter) <- segment "Encounter Dugtrio" segment3Paths $ \gb inputRef path -> do
         bufferedWalk gb inputRef path
@@ -271,6 +461,7 @@ dugtrio = do
 
     -- TODO(strager): Return something useful.
     return []
+-}
 
 randomOf :: (RandomGen g) => [a] -> g -> (a, g)
 randomOf xs gen = (xs !! index, gen')
@@ -310,3 +501,24 @@ readEncounter gb = do
         , speedDV = (dv2 `shiftR` 4) .&. 0xF
         , specialDV = dv2 .&. 0xF
         }
+
+pressAArbitrarily :: [Input] -> [[Input]]
+pressAArbitrarily path = map
+    (\aInputs -> zipWith (<>) path aInputs)
+    $ map (\i -> shuffle (replicate i i_A ++ replicate (length path - i) (Input 0)) (mkStdGen 0)) [0..(length path `div` 2)]
+    -- Brute force method: $ combinations [Input 0, i_A] (length path)
+
+-- https://stackoverflow.com/a/29054603/39992
+shuffle :: (RandomGen g) => [a] -> g -> [a]
+shuffle [] _gen = []
+shuffle xs gen =
+    let (randomPosition, gen') = randomR (0, length xs - 1) gen
+        (left, (a:right)) = splitAt randomPosition xs
+    in a : shuffle (left ++ right) gen'
+
+readRNGState :: GB -> IO (Word8, Word8, Word8)
+readRNGState gb = do
+    add <- cpuRead gb 0xFFD3
+    sub <- cpuRead gb 0xFFD4
+    div <- cpuRead gb 0xFF04
+    return (add, sub, div)
