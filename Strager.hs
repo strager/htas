@@ -267,24 +267,6 @@ instance Alternative Search where
     empty = Empty
     x <|> y = Alternative x y (\r -> Pure r)
 
-{-
-instance {-# OVERLAPPING #-} Alternative (Free SearchDSL) where
-    empty = liftF Empty
-    x <|> y = liftF $ Alternative x y id
--- -}
-{-
-instance Alternative SearchDSL where
-    empty = Empty
-    x <|> y = Alternative x y id
--- -}
-
-{-
-instance MonadIO (Free SearchDSL) where
-    liftIO io = liftF $ LiftIO io id
--}
-
---type Search = Free SearchDSL
-
 -- TODO(strager)
 type Cost = ()
 
@@ -359,11 +341,6 @@ getGameboy = GetGameboy (\gb -> Pure gb)
 log :: String -> Search ()
 log message = Log message (Pure ())
 
-randomOf :: (RandomGen g) => [a] -> g -> (a, g)
-randomOf xs gen = (xs !! index, gen')
-    where
-    (index, gen') = randomR (0, length xs - 1) gen
-
 setSaveFrames :: Word8 -> ByteString -> ByteString
 setSaveFrames f dat =
     let dat' = editByte saveTimeFrames f dat
@@ -397,14 +374,6 @@ readEncounter gb = do
         , speedDV = (dv2 `shiftR` 4) .&. 0xF
         , specialDV = dv2 .&. 0xF
         }
-
--- https://stackoverflow.com/a/29054603/39992
-shuffle :: (RandomGen g) => [a] -> g -> [a]
-shuffle [] _gen = []
-shuffle xs gen =
-    let (randomPosition, gen') = randomR (0, length xs - 1) gen
-        (left, (a:right)) = splitAt randomPosition xs
-    in a : shuffle (left ++ right) gen'
 
 readRNGState :: GB -> IO (Word8, Word8, Word8)
 readRNGState gb = do
