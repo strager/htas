@@ -26,12 +26,12 @@ import System.IO
 import Text.Printf
 import Control.Monad.Trans.State (evalState, state)
 import Data.List (nub, permutations)
-import Control.Concurrent.STM (atomically)
+import Control.Concurrent.STM (atomically, retry)
 import Control.Concurrent.STM.TChan (TChan, newTChan, readTChan, writeTChan)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
-import Control.Concurrent.STM.TVar (TVar, newTVar, readTVar, readTVarIO, writeTVar)
+import Control.Concurrent.STM.TVar (TVar, modifyTVar, newTVarIO, readTVar, readTVarIO, writeTVar)
 import Control.Exception (bracket)
-import Control.Concurrent.Async (forConcurrently)
+import Control.Concurrent.Async (async, asyncBound, wait)
 
 import HTas.Direct
 import HTas.Low
@@ -141,7 +141,9 @@ expectMap :: Word8 -> Search ()
 expectMap map = do
     gb <- getGameboy
     location <- liftIO $ getLocation gb
-    when (locMap location /= map) prune
+    when (locMap location /= map) $ do
+        liftIO $ printf "expected %d got %d\n" map (locMap location)
+        prune
 
 viridianCityMap :: Word8
 viridianCityMap = 5
@@ -162,10 +164,9 @@ dugtrio = do
     -- TODO(strager): Prune if we're not at the expected
     -- location.
 
-    inputRef <- liftIO $ newIORef mempty
-    liftIO $ setInputGetter gb (readIORef inputRef)
-
     let tryStep input = do
+            inputRef <- liftIO $ newIORef mempty
+            liftIO $ setInputGetter gb (readIORef inputRef)
             liftIO $ bufferedStep gb inputRef input
             checkpoint
             return input
@@ -220,6 +221,7 @@ dugtrio = do
                 if encountered
                 then do
                     encounter <- liftIO $ readEncounter gb
+                    log $ printf "%s\n" (show encounter)
                     unless (species encounter == 118 && level encounter == 31) prune
                     checkpoint
                     return ([step], encounter)
@@ -275,23 +277,27 @@ type GBState = ByteString
 type Checkpointer c = GB -> IO c
 
 runSearch :: forall a c. (Show c, Eq c, Ord c) => IO GB -> Checkpointer c -> Search a -> IO [a]
-runSearch newGB checkpointer search = do
-    gb <- newGB
-    checkpointsRef <- newIORef (Map.empty :: Map c (Cost, GBState))
-    queueRef <- newIORef (Heap.singleton ((), search) :: MinPrioHeap Cost (Search a))
-    resultsRef <- newIORef ([] :: [a])
-    let runSearch' :: Search a -> IO [a]
-        runSearch' (Alternative x y continue) = do
+runSearch newGB checkpointer initialSearch = do
+    logMutex <- newMVar ()
+    checkpointsVar <- newTVarIO (Map.empty :: Map c (Cost, GBState))
+    queueVar <- newTVarIO (Heap.singleton ((), initialSearch) :: MinPrioHeap Cost (Search a))
+    resultsVar <- newTVarIO ([] :: [a])
+    runningGBsVar <- newTVarIO (0 :: Int)
+
+    let runSearch' :: GB -> Search a -> IO [a]
+        runSearch' gb (Alternative x y continue) = do
             -- FIXME(strager): We also need to save the
             -- input getter.
+            -- TODO(strager): Put one side into the queue so
+            -- we can execute both sides concurrently.
             beforeState <- saveState gb
-            xs <- runSearch' (x >>= \r -> continue r)
+            xs <- runSearch' gb (x >>= \r -> continue r)
             loadState gb beforeState
-            ys <- runSearch' (y >>= \r -> continue r)
+            ys <- runSearch' gb (y >>= \r -> continue r)
             return (xs ++ ys)
-        runSearch' (Checkpoint continue) = do
+        runSearch' gb (Checkpoint continue) = do
             checkpoint <- checkpointer gb
-            checkpoints <- readIORef checkpointsRef
+            checkpoints <- readTVarIO checkpointsVar
             let isCheckpointNew = case Map.lookup checkpoint checkpoints of
                     Nothing -> True
                     Just (_cost, _state) -> False -- TODO(strager): Pick the solution with the lower cost.
@@ -299,38 +305,64 @@ runSearch newGB checkpointer search = do
             then do
                 let cost = () -- TODO(strager)
                 state <- saveState gb
-                writeIORef checkpointsRef $ Map.insert checkpoint (cost, state) checkpoints
-                -- Breadth-first search.
-                let continue' = do
-                        gb <- getGameboy
-                        liftIO $ loadState gb state
-                        continue
-                modifyIORef queueRef $ Heap.insert (cost, continue')
+                atomically $ do
+                    checkpoints <- readTVar checkpointsVar
+                    let isCheckpointStillNew = case Map.lookup checkpoint checkpoints of
+                            Nothing -> True
+                            Just (_cost, _state) -> False -- TODO(strager): Pick the solution with the lower cost.
+                    when isCheckpointStillNew $ do
+                        writeTVar checkpointsVar $ Map.insert checkpoint (cost, state) checkpoints
+                        -- Breadth-first search.
+                        let continue' = do
+                                gb <- getGameboy
+                                liftIO $ loadState gb state
+                                continue
+                        modifyTVar queueVar $ Heap.insert (cost, continue')
                 return []
             else return [] -- Prune.
-        runSearch' Empty = return []
-        runSearch' (GetGameboy continue) = runSearch' (continue gb)
-        runSearch' (LiftIO io continue) = do
+        runSearch' _gb Empty = return []
+        runSearch' gb (GetGameboy continue) = runSearch' gb (continue gb)
+        runSearch' gb (LiftIO io continue) = do
             x <- io
-            runSearch' (continue x)
-        runSearch' (Log message continue) = do
-            hPutStr stderr message
-            runSearch' continue
-        runSearch' (Pure x) = return [x]
+            runSearch' gb (continue x)
+        runSearch' gb (Log message continue) = do
+            withMVar logMutex $ \() -> hPutStr stderr message
+            runSearch' gb continue
+        runSearch' _gb (Pure x) = return [x]
 
-    let processQueue :: IO ()
-        processQueue = do
-            queue <- readIORef queueRef
-            case Heap.view queue of
-                Just ((_cost, search), queue') -> do
-                    writeIORef queueRef queue'
-                    results <- runSearch' search
-                    modifyIORef resultsRef (results ++)
-                    processQueue
-                Nothing -> return ()
+    let processQueue :: GB -> IO ()
+        processQueue gb = do
+            let acquireWork :: IO (Maybe (Search a))
+                acquireWork = atomically $ do
+                    queue <- readTVar queueVar
+                    case Heap.view queue of
+                        Just ((_cost, search), queue') -> do
+                            modifyTVar runningGBsVar (+ 1)
+                            writeTVar queueVar queue'
+                            return $ Just search
+                        Nothing -> do
+                            runningGBs <- readTVar runningGBsVar
+                            if runningGBs == 0
+                            then return Nothing
+                            else retry
+            let releaseWork :: Maybe (Search a) -> IO ()
+                releaseWork Nothing = return ()
+                releaseWork (Just _work) = atomically $ modifyTVar runningGBsVar (`subtract` 1)
+            let handleWork :: Maybe (Search a) -> IO Bool
+                handleWork Nothing = return False
+                handleWork (Just work) = do
+                    results <- runSearch' gb work
+                    atomically $ modifyTVar resultsVar (results ++)
+                    return True
+            queueSize <- Heap.size <$> readTVarIO queueVar
+            keepGoing <- bracket acquireWork releaseWork handleWork
+            when keepGoing $ processQueue gb
 
-    processQueue
-    readIORef resultsRef
+    threads <- forM [1..1] $ \_ -> async $ do
+        gb <- newGB
+        processQueue gb
+    mapM_ wait threads
+    readTVarIO resultsVar
 
 checkpoint :: Search ()
 checkpoint = Checkpoint (Pure ())
