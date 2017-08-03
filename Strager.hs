@@ -224,7 +224,7 @@ dugtrio = do
                     checkpoint
                     return ([step], encounter)
                 else do
-                    checkpoint
+                    --checkpoint -- FIXME(strager): Why doesn't this work?
                     (path, encounter) <- loop (depth + 1)
                     return (step : path, encounter)
         loop 0
