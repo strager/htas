@@ -21,7 +21,6 @@ import Foreign
 import Foreign.C.Types
 import System.IO
 import Text.Printf
-import Control.Monad.Free (Free(Free, Pure), liftF)
 import Control.Monad.Trans.State (evalState, state)
 import Data.List (nub, permutations)
 import Control.Concurrent.STM (atomically)
@@ -125,41 +124,74 @@ main = do
         encounter <- if encountered
             then Just <$> readEncounter gb
             else return Nothing
+        location <- getLocation gb
         rngState <- readRNGState gb
         return RedCheckpoint
             { checkpointEncounter = encounter
+            , checkpointLocation = location
             , checkpointRNGState = rngState
             }
 
 data RedCheckpoint = RedCheckpoint
     { checkpointEncounter :: Maybe Encounter
+    , checkpointLocation :: Location
     , checkpointRNGState :: (Word8, Word8, Word8)
-    -- TODO(strager): In-game timer.
+    -- TODO(strager): Checkpoint object timers.
+    -- TODO(strager): Checkpoint the direction the player is facing.
+    -- TODO(strager): Checkpoint the in-game timer.
     }
     deriving (Eq, Ord)
 
 prune :: Search a
 prune = empty
 
+expectMap :: Word8 -> Search ()
+expectMap map = do
+    gb <- getGameboy
+    location <- liftIO $ getLocation gb
+    when (locMap location /= map) prune
+
+viridianCityMap :: Word8
+viridianCityMap = 5
+
+route11Map :: Word8
+route11Map = 22
+
+diglettCaveEntranceBMap :: Word8
+diglettCaveEntranceBMap = 85
+
+diglettCaveMap :: Word8
+diglettCaveMap = 197
+
 dugtrio :: Search ()
 dugtrio = do
+    gb <- getGameboy
     -- TODO(strager): Prune if we're not at the expected
     -- location.
 
-    let segment1Paths = pressAArbitrarily $ replicate 19 i_Right ++ [i_Up]
-    segment1Path <- asum $ (for segment1Paths $ ((\path -> do
-        gb <- getGameboy
-        inputRef <- liftIO $ newIORef mempty
-        liftIO $ setInputGetter gb (readIORef inputRef)
-        forM_ path $ \step -> do
-            liftIO $ bufferedStep gb inputRef step
-            encountered <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
-            when encountered prune
-            -- TODO(strager): Prune if we're not at the
-            -- expected location.
-            checkpoint
-        return path) :: [Input] -> Search [Input]) :: [Search [Input]])
+    inputRef <- liftIO $ newIORef mempty
+    liftIO $ setInputGetter gb (readIORef inputRef)
 
+    let tryStep input = do
+            liftIO $ bufferedStep gb inputRef input
+            checkpoint
+            return input
+    let tryStepA input = tryStep input <|> tryStep (input <> i_A)
+
+    segment1Path <- replicateM 14 $ tryStepA i_Right <* expectMap viridianCityMap
+    segment2Path <- replicateM 5 $ tryStepA i_Right <* expectMap route11Map
+    segment3Step <- tryStepA i_Up <* expectMap diglettCaveEntranceBMap
+    let segment3Path = [segment3Step]
+
+    segment4Path <- do
+        s1 <- tryStepA i_Up <* expectMap diglettCaveEntranceBMap
+        s2 <- tryStepA i_Up <* expectMap diglettCaveEntranceBMap
+        s3 <- tryStepA i_Right <* expectMap diglettCaveEntranceBMap
+        s4 <- tryStepA i_Up <* expectMap diglettCaveEntranceBMap
+        s5 <- tryStepA i_Right <* expectMap diglettCaveMap
+        return [s1, s2, s3, s4, s5]
+
+{-
     let segment2Paths = do
             basePath <- concat
               [ map (i_Up :) $ nub $ permutations [i_Up, i_Up, i_Right, i_Right]
@@ -174,43 +206,27 @@ dugtrio = do
                     (path !! 2) `hasAllInput` i_Up &&
                     (path !! 3) `hasAllInput` i_A) aPaths
             aPaths'
-    segment2Path <- asum $ for segment2Paths $ \path -> do
-        gb <- getGameboy
-        inputRef <- liftIO $ newIORef mempty
-        liftIO $ setInputGetter gb (readIORef inputRef)
-        forM_ path $ \step -> do
-            liftIO $ bufferedStep gb inputRef step
-            encountered <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
-            when encountered prune
-            -- TODO(strager): Prune if we're not at the
-            -- expected location.
-            checkpoint
-        return path
+            -}
 
-    let segment3Paths = flip map [0 :: Int .. 1 :: Int] $ \seed ->
-            i_Left : (flip evalState (mkStdGen seed) $ do
-                forM [0..8] $ \_ ->
-                    state $ randomOf [i_Up, i_Down, i_Left, i_Up <> i_A, i_Down <> i_A, i_Left <> i_A])
-    (segment3Path, encounter) <- asum $ for segment3Paths $ \path -> do
-        gb <- getGameboy
-        inputRef <- liftIO $ newIORef mempty
-        liftIO $ setInputGetter gb (readIORef inputRef)
-        let runPathUntilEncounter [] = return ()
-            runPathUntilEncounter (step:rest) = do
+    (segment5Path, encounter) <- do
+        let loop depth = do
+                when (depth > 7) prune
+                step <- tryStepA i_Up <|> tryStepA i_Down <|> tryStepA i_Left
+                expectMap diglettCaveMap
                 encountered <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
-                unless encountered $ do
-                    liftIO $ bufferedStep gb inputRef step
-                    checkpoint
-                    runPathUntilEncounter rest
-        runPathUntilEncounter path
-        encountered <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
-        unless encountered prune
-        checkpoint
-        encounter <- liftIO $ readEncounter gb
-        liftIO $ print encounter
-        return (path, encounter)
+                if encountered
+                then do
+                    encounter <- liftIO $ readEncounter gb
+                    liftIO $ print encounter
+                    return ([step], encounter)
+                else do
+                    (path, encounter) <- loop (depth + 1)
+                    return (step : path, encounter)
+        loop 0
 
-    log $ printf "Found encounter: %s\n - %s\n - %s\n - %s\n" (show encounter) (show segment1Path) (show segment2Path) (show segment3Path)
+    let paths = [segment1Path, segment2Path, segment3Path, segment4Path, segment5Path]
+    log $ printf "Found encounter: %s\n%s" (show encounter)
+        $ concat (map (\path -> printf " - %s\n" (show path) :: String) paths)
 
 {-
 data SearchDSL f where
@@ -231,24 +247,45 @@ instance Functor SearchDSL where
 -}
 
 data Search a where
-    Alternative :: Search a -> Search a -> Search a
-    Bind :: Search a -> (a -> Search b) -> Search b
-    Checkpoint :: Search ()
+    Alternative :: Search a -> Search a -> (a -> Search b) -> Search b
+    Checkpoint :: Search a -> Search a
     Empty :: Search a
-    LiftIO :: IO a -> Search a
-    Log :: String -> Search ()
+    GetGameboy :: (GB -> Search a) -> Search a
+    LiftIO :: IO a -> (a -> Search b) -> Search b
+    Log :: String -> Search a -> Search a
     Pure :: a -> Search a
 
-instance Functor Search where
-    fmap f search = Bind search (\x -> Pure (f x))
+--instance Functor Search where
+    --fmap f search = Bind search (\x -> Pure (f x))
     {-
     fmap f (Alternative x y) = Alternative (fmap f x) (fmap f y)
     fmap f (Bind search continue) = Bind (fmap f search) (\x -> fmap search continue)
     -}
 
+instance Functor Search where
+    fmap f x = x >>= pure . f
+
+instance Applicative Search where
+    pure x = Pure x
+    x <*> y = x >>= (\f -> y >>= pure . f)
+
 instance Monad Search where
+    Alternative x y continue >>= continue' = Alternative x y (\r -> continue r >>= continue')
+    Checkpoint continue >>= continue' = Checkpoint (continue >>= continue')
+    Empty >>= _ = Empty
+    GetGameboy continue >>= continue' = GetGameboy (\gb -> continue gb >>= continue')
+    LiftIO io continue >>= continue' = LiftIO io (\r -> continue r >>= continue')
+    Log message continue >>= continue' = Log message (continue >>= continue')
+    Pure x >>= continue' = continue' x
+
     return x = Pure x
-    search >>= continue = Bind search continue
+
+instance MonadIO Search where
+    liftIO io = LiftIO io (\r -> Pure r)
+
+instance Alternative Search where
+    empty = Empty
+    x <|> y = Alternative x y (\r -> Pure r)
 
 {-
 instance {-# OVERLAPPING #-} Alternative (Free SearchDSL) where
@@ -280,13 +317,15 @@ runSearch newGB checkpointer search = do
     gb <- newGB
     checkpointsRef <- newIORef (Map.empty :: Map c (Cost, GBState))
     let runSearch' :: Search a -> IO [a]
-        runSearch' (Free (Alternative x y continue)) = do
+        runSearch' (Alternative x y continue) = do
+            -- FIXME(strager): We also need to save the
+            -- input getter.
             beforeState <- saveState gb
-            xs <- runSearch' (liftF x >>= continue)
+            xs <- runSearch' (x >>= \r -> continue r)
             loadState gb beforeState
-            ys <- runSearch' (liftF y >>= continue)
+            ys <- runSearch' (y >>= \r -> continue r)
             return (xs ++ ys)
-        runSearch' (Free (Checkpoint continue)) = do
+        runSearch' (Checkpoint continue) = do
             checkpoint <- checkpointer gb
             checkpoints <- readIORef checkpointsRef
             let isCheckpointNew = case Map.lookup checkpoint checkpoints of
@@ -296,25 +335,29 @@ runSearch newGB checkpointer search = do
             then do
                 let cost = () -- TODO(strager)
                 state <- saveState gb
-                writeIORef checkpointsRef $ Map.insert checkpoint (cost, state)
+                writeIORef checkpointsRef $ Map.insert checkpoint (cost, state) checkpoints
                 -- TODO(strager): Breadth-first search.
                 runSearch' continue
-            else return () -- Prune.
-        runSearch' (Free (GetGameboy continue)) = continue gb
-        runSearch' (Free Empty) = return ()
-        runSearch' (Free (Log message continue)) = do
+            else return [] -- Prune.
+        runSearch' Empty = return []
+        runSearch' (GetGameboy continue) = runSearch' (continue gb)
+        runSearch' (LiftIO io continue) = do
+            x <- io
+            runSearch' (continue x)
+        runSearch' (Log message continue) = do
             hPutStr stderr message
             runSearch' continue
+        runSearch' (Pure x) = return [x]
     runSearch' search
 
 checkpoint :: Search ()
-checkpoint = liftF $ Checkpoint ()
+checkpoint = Checkpoint (Pure ())
 
 getGameboy :: Search GB
-getGameboy = liftF $ GetGameboy id
+getGameboy = GetGameboy (\gb -> Pure gb)
 
 log :: String -> Search ()
-log message = liftF $ Log message ()
+log message = Log message (Pure ())
 
 {-
 data SearchDSL f where

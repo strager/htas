@@ -33,6 +33,9 @@ getLocation gb = do
         , locY = y
         }
 
+bufferedStep :: GB -> IORef Input -> Input -> IO ()
+bufferedStep gb inputRef input = bufferedWalk gb inputRef [input]
+
 -- Walk with buffered inputs
 -- Aborts if a battle starts
 bufferedWalk :: GB -> IORef Input -> [Input] -> IO ()
@@ -44,6 +47,8 @@ bufferedWalk gb inRef inps =
             if inBattle /= 0
             then pure ()
             else do
+                -- TODO(strager): Stop if we open a menu
+                -- (e.g. by talking to a sign).
                 writeIORef inRef d
                 waitForWalkStart gb
                 waitForStep gb
