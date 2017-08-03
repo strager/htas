@@ -185,6 +185,7 @@ executable Strager
                 , containers >=0.5
                 , filepath >=1.4
                 , free >= 4.12.4
+                , heap >= 1.0
                 , random >=1.1
                 , stm >=2.4.4
                 , transformers >= 0.4.2
