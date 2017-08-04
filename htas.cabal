@@ -177,7 +177,7 @@ executable Strager
                  , Red.Save
                  , Search
   extra-libraries: stdc++
-  ghc-options: -pgmlg++ -O2
+  ghc-options: -pgmlg++ -O2 -threaded -eventlog
   cc-options: -std=c++11 -fPIC -O2 -g
   build-depends:  async>=2.1.0
                 , base >=4.8 && <4.9
@@ -188,6 +188,7 @@ executable Strager
                 , heap >= 1.0
                 , random >=1.1
                 , stm >=2.4.4
+                , stm-stats >= 0.2
                 , transformers >= 0.4.2
                 , vector >=0.10
   default-language:    Haskell2010

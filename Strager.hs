@@ -31,7 +31,8 @@ import Control.Concurrent.STM.TChan (TChan, newTChan, readTChan, writeTChan)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM.TVar (TVar, modifyTVar, newTVarIO, readTVar, readTVarIO, writeTVar)
 import Control.Exception (bracket)
-import Control.Concurrent.Async (async, asyncBound, wait)
+import Control.Concurrent.Async (async, wait)
+import Control.Concurrent.STM.Stats (dumpSTMStats, trackNamedSTM)
 
 import HTas.Direct
 import HTas.Low
@@ -93,6 +94,7 @@ main :: IO ()
 main = do
     baseSave <- BS.readFile "pokered_dugtrio3.sav"
 
+    forkIO $ threadDelay (1000 * 1000 * 5) >> dumpSTMStats
     runSearch newGB checkpointer $ do
         _frame <- asum $ for [0] $ \frame -> do
             gb <- getGameboy
@@ -159,13 +161,12 @@ diglettCaveMap = 197
 
 dugtrio :: Search ()
 dugtrio = do
-    gb <- getGameboy
-
     -- TODO(strager): Prune if we're not at the expected
     -- location.
 
     let tryStep input = do
             inputRef <- liftIO $ newIORef mempty
+            gb <- getGameboy
             liftIO $ setInputGetter gb (readIORef inputRef)
             liftIO $ bufferedStep gb inputRef input
             checkpoint
@@ -217,6 +218,7 @@ dugtrio = do
                 when (depth > 7) prune
                 step <- tryStepA i_Up <|> tryStepA i_Down <|> tryStepA i_Left
                 expectMap diglettCaveMap
+                gb <- getGameboy
                 encountered <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
                 if encountered
                 then do
@@ -305,7 +307,7 @@ runSearch newGB checkpointer initialSearch = do
             then do
                 let cost = () -- TODO(strager)
                 state <- saveState gb
-                atomically $ do
+                trackNamedSTM "store checkpoint" $ do
                     checkpoints <- readTVar checkpointsVar
                     let isCheckpointStillNew = case Map.lookup checkpoint checkpoints of
                             Nothing -> True
@@ -332,33 +334,26 @@ runSearch newGB checkpointer initialSearch = do
 
     let processQueue :: GB -> IO ()
         processQueue gb = do
-            let acquireWork :: IO (Maybe (Search a))
-                acquireWork = atomically $ do
+            let acquireWork :: IO (Search a)
+                acquireWork = trackNamedSTM "acquireWork" $ do
                     queue <- readTVar queueVar
                     case Heap.view queue of
                         Just ((_cost, search), queue') -> do
-                            modifyTVar runningGBsVar (+ 1)
+                            --modifyTVar runningGBsVar (+ 1)
                             writeTVar queueVar queue'
-                            return $ Just search
-                        Nothing -> do
-                            runningGBs <- readTVar runningGBsVar
-                            if runningGBs == 0
-                            then return Nothing
-                            else retry
-            let releaseWork :: Maybe (Search a) -> IO ()
-                releaseWork Nothing = return ()
-                releaseWork (Just _work) = atomically $ modifyTVar runningGBsVar (`subtract` 1)
-            let handleWork :: Maybe (Search a) -> IO Bool
-                handleWork Nothing = return False
-                handleWork (Just work) = do
+                            return search
+                        Nothing -> retry
+            let releaseWork :: Search a -> IO ()
+                releaseWork _work = return ()
+            let handleWork :: Search a -> IO ()
+                handleWork work = do
                     results <- runSearch' gb work
-                    atomically $ modifyTVar resultsVar (results ++)
-                    return True
-            queueSize <- Heap.size <$> readTVarIO queueVar
-            keepGoing <- bracket acquireWork releaseWork handleWork
-            when keepGoing $ processQueue gb
+                    trackNamedSTM "append results" $ modifyTVar resultsVar (results ++)
+            bracket acquireWork releaseWork handleWork
+            -- TODO(strager): Terminate this loop!
+            processQueue gb
 
-    threads <- forM [1..1] $ \_ -> async $ do
+    threads <- forM [1..8] $ \_ -> async $ do
         gb <- newGB
         processQueue gb
     mapM_ wait threads
