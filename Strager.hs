@@ -86,6 +86,7 @@ import Red.Overworld
 import Red.Save
 --import Search
 --import MoonManip
+import System.Exit (exitFailure)
 
 for :: [a] -> (a -> b) -> [b]
 for = flip map
@@ -94,7 +95,6 @@ main :: IO ()
 main = do
     baseSave <- BS.readFile "pokered_dugtrio3.sav"
 
-    forkIO $ threadDelay (1000 * 1000 * 5) >> dumpSTMStats
     runSearch newGB checkpointer $ do
         _frame <- asum $ for [0] $ \frame -> do
             gb <- getGameboy
@@ -144,7 +144,7 @@ expectMap map = do
     gb <- getGameboy
     location <- liftIO $ getLocation gb
     when (locMap location /= map) $ do
-        liftIO $ printf "expected %d got %d\n" map (locMap location)
+        -- log $ printf "expected %d got %d\n" map (locMap location)
         prune
 
 viridianCityMap :: Word8
@@ -169,16 +169,18 @@ dugtrio = do
             gb <- getGameboy
             liftIO $ setInputGetter gb (readIORef inputRef)
             liftIO $ bufferedStep gb inputRef input
-            checkpoint
             return input
 
     let tryStepA input = tryStep input <|> tryStep (input <> i_A)
 
     let tryStepsPressingAArbitrarily [] _aPressesAllowed = return []
         tryStepsPressingAArbitrarily (input : remainingInputs) aPressesAllowed
-            | aPressesAllowed == 0 = tryStepWithoutA
-            | otherwise = tryStepWithoutA <|> tryStepWithA
+            | aPressesAllowed == 0 = tryStepWithoutA <* maybeCheckpoint
+            | otherwise = tryStepWithoutA <|> tryStepWithA <* maybeCheckpoint
             where
+            maybeCheckpoint
+                | length remainingInputs `mod` 4 == 0 = checkpoint
+                | otherwise = return ()
             tryStepWithoutA = ((:) <$> tryStep input <*> tryStepsPressingAArbitrarily remainingInputs aPressesAllowed)
             tryStepWithA = ((:) <$> tryStep (input <> i_A) <*> tryStepsPressingAArbitrarily remainingInputs (aPressesAllowed - 1))
 
@@ -195,6 +197,7 @@ dugtrio = do
         s4 <- tryStepA i_Up <* expectMap diglettCaveEntranceBMap
         s5 <- tryStepA i_Right <* expectMap diglettCaveMap
         return [s1, s2, s3, s4, s5]
+    checkpoint
 
 {-
     let segment2Paths = do
@@ -223,7 +226,7 @@ dugtrio = do
                 if encountered
                 then do
                     encounter <- liftIO $ readEncounter gb
-                    log $ printf "%s\n" (show encounter)
+                    -- log $ printf "%s\n" (show encounter)
                     unless (species encounter == 118 && level encounter == 31) prune
                     checkpoint
                     return ([step], encounter)
@@ -278,25 +281,22 @@ type GBState = ByteString
 
 type Checkpointer c = GB -> IO c
 
-runSearch :: forall a c. (Show c, Eq c, Ord c) => IO GB -> Checkpointer c -> Search a -> IO [a]
+runSearch :: forall a c. (Show c, Eq c, Ord c) => IO GB -> Checkpointer c -> Search a -> IO ()
 runSearch newGB checkpointer initialSearch = do
     logMutex <- newMVar ()
     checkpointsVar <- newTVarIO (Map.empty :: Map c (Cost, GBState))
     queueVar <- newTVarIO (Heap.singleton ((), initialSearch) :: MinPrioHeap Cost (Search a))
-    resultsVar <- newTVarIO ([] :: [a])
-    runningGBsVar <- newTVarIO (0 :: Int)
 
-    let runSearch' :: GB -> Search a -> IO [a]
+    let runSearch' :: GB -> Search a -> IO ()
         runSearch' gb (Alternative x y continue) = do
             -- FIXME(strager): We also need to save the
             -- input getter.
             -- TODO(strager): Put one side into the queue so
             -- we can execute both sides concurrently.
             beforeState <- saveState gb
-            xs <- runSearch' gb (x >>= \r -> continue r)
+            runSearch' gb (x >>= \r -> continue r)
             loadState gb beforeState
-            ys <- runSearch' gb (y >>= \r -> continue r)
-            return (xs ++ ys)
+            runSearch' gb (y >>= \r -> continue r)
         runSearch' gb (Checkpoint continue) = do
             checkpoint <- checkpointer gb
             checkpoints <- readTVarIO checkpointsVar
@@ -320,9 +320,8 @@ runSearch newGB checkpointer initialSearch = do
                                 liftIO $ loadState gb state
                                 continue
                         modifyTVar queueVar $ Heap.insert (cost, continue')
-                return []
-            else return [] -- Prune.
-        runSearch' _gb Empty = return []
+            else return () -- Prune.
+        runSearch' _gb Empty = return ()
         runSearch' gb (GetGameboy continue) = runSearch' gb (continue gb)
         runSearch' gb (LiftIO io continue) = do
             x <- io
@@ -330,7 +329,7 @@ runSearch newGB checkpointer initialSearch = do
         runSearch' gb (Log message continue) = do
             withMVar logMutex $ \() -> hPutStr stderr message
             runSearch' gb continue
-        runSearch' _gb (Pure x) = return [x]
+        runSearch' _gb (Pure _) = return ()
 
     let processQueue :: GB -> IO ()
         processQueue gb = do
@@ -339,16 +338,13 @@ runSearch newGB checkpointer initialSearch = do
                     queue <- readTVar queueVar
                     case Heap.view queue of
                         Just ((_cost, search), queue') -> do
-                            --modifyTVar runningGBsVar (+ 1)
                             writeTVar queueVar queue'
                             return search
                         Nothing -> retry
             let releaseWork :: Search a -> IO ()
                 releaseWork _work = return ()
             let handleWork :: Search a -> IO ()
-                handleWork work = do
-                    results <- runSearch' gb work
-                    trackNamedSTM "append results" $ modifyTVar resultsVar (results ++)
+                handleWork work = runSearch' gb work
             bracket acquireWork releaseWork handleWork
             -- TODO(strager): Terminate this loop!
             processQueue gb
@@ -356,8 +352,15 @@ runSearch newGB checkpointer initialSearch = do
     threads <- forM [1..8] $ \_ -> async $ do
         gb <- newGB
         processQueue gb
+
+    -- DEBUGGING
+    forM_ [1..30] $ \_ -> do
+        threadDelay (1000 * 1000)
+        checkpoints <- readTVarIO checkpointsVar
+        printf "%d checkpoints\n" (Map.size checkpoints)
+    exitFailure
+
     mapM_ wait threads
-    readTVarIO resultsVar
 
 checkpoint :: Search ()
 checkpoint = Checkpoint (Pure ())
