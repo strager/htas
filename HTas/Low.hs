@@ -13,6 +13,7 @@ import Foreign.C.Types
 import HTas.Direct
 import System.FilePath
 import Text.Printf
+import Debug.Trace (traceEventIO)
 
 create :: IO GB
 create = gambatte_create
@@ -47,6 +48,7 @@ getMemoryArea :: GB -> MemoryArea -> IO ByteString
 getMemoryArea gb area = do
     datPtr <- malloc
     lenPtr <- malloc
+    traceEventIO "gambatte_getmemoryarea"
     void $ gambatte_getmemoryarea gb (memoryAreaCode area) datPtr lenPtr
     cDat <- peek datPtr
     cLen <- peek lenPtr
@@ -71,6 +73,7 @@ data Regs = Regs
 getRegs :: GB -> IO Regs
 getRegs gb = do
     regArea <- mallocBytes (10 * sizeOf (undefined :: CInt))
+    traceEventIO "gambatte_getregs"
     gambatte_getregs gb regArea
     pc <- peekElemOff regArea 0
     sp <- peekElemOff regArea 1
@@ -109,6 +112,7 @@ advanceFrame :: GB -> IO ()
 advanceFrame gb = do
     soundbuf <- mallocBytes ((35112+2064) * sizeOf (undefined :: CInt))
     samples <- new 35112
+    traceEventIO "gambatte_runfor"
     ret <- gambatte_runfor gb soundbuf samples
     free soundbuf
     free samples
@@ -130,13 +134,17 @@ getCycleCount gb = do
 setExecCallback :: GB -> (Integer -> IO ()) -> IO ()
 setExecCallback gb cb = do
     cCallback <- createCallback (cb . toInteger)
+    traceEventIO "gambatte_setexeccallback"
     gambatte_setexeccallback gb cCallback
+    -- FIXME(strager): We leaked cCallback!
 
 isCgb :: GB -> IO Integer
 isCgb gb = toInteger <$> gambatte_iscgb gb
 
 cpuRead :: GB -> Integer -> IO Word8
-cpuRead gb addr = gambatte_cpuread gb (fromInteger addr)
+cpuRead gb addr = do
+  traceEventIO "gambatte_cpuread"
+  gambatte_cpuread gb (fromInteger addr)
 
 cpuReadW :: GB -> Integer -> IO Word16
 cpuReadW gb addr = do
@@ -216,13 +224,16 @@ instance Storable TraceData where
 setTraceCallback :: GB -> (TraceData -> IO ()) -> IO ()
 setTraceCallback gb cb = do
     cCallback <- createTraceCallback cb'
+    traceEventIO "gambatte_settracecallback"
     gambatte_settracecallback gb cCallback
+    -- FIXME(strager): We leaked cCallback!
     where
     cb' :: Ptr () -> IO ()
     cb' p = peek (castPtr p) >>= cb
 
 clearTraceCallback :: GB -> IO ()
 clearTraceCallback gb = do
+    traceEventIO "gambatte_settracecallback"
     gambatte_settracecallback gb nullFunPtr
 
 traceRegs :: TraceData -> Regs
@@ -305,16 +316,24 @@ i_A = Input 0x01
 
 setInputGetter :: GB -> IO Input -> IO ()
 setInputGetter gb getter = do
-    cGetter <- createInputGetter ((\(Input w) -> fromIntegral w) <$> getter)
+    --cGetter <- createInputGetter ((\(Input w) -> fromIntegral w) <$> getter)
+    cGetter <- createInputGetter $ do
+      traceEventIO "gambatte_setinputgetter cb"
+      Input w <- getter
+      return $ fromIntegral w
+    traceEventIO "gambatte_setinputgetter"
     gambatte_setinputgetter gb cGetter
+    -- FIXME(strager): We leaked cGetter!
 
 reset :: GB -> IO ()
 reset gb = gambatte_reset gb 0
 
 saveState :: GB -> IO ByteString
 saveState gb = do
+    traceEventIO "gambatte_newstatelen"
     len <- gambatte_newstatelen gb
     dat <- mallocBytes (fromIntegral len)
+    traceEventIO "gambatte_newstatesave"
     void $ gambatte_newstatesave gb dat len
     bsDat <- BS.packCStringLen (dat, fromIntegral len)
     free dat
@@ -322,5 +341,6 @@ saveState gb = do
 
 loadState :: GB -> ByteString -> IO ()
 loadState gb bsDat = do
-    BS.useAsCStringLen bsDat $ \(dat, len) ->
+    BS.useAsCStringLen bsDat $ \(dat, len) -> do
+        traceEventIO "gambatte_newstateload"
         void $ gambatte_newstateload gb dat (fromIntegral len)
