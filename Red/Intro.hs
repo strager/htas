@@ -53,6 +53,7 @@ doOptimalIntro gb = do
                 pure ()
 
     advanceUntilDone gb introState frameCounter
+    clearTraceCallback gb
 
 advanceUntilDone :: GB -> IORef IntroState -> IORef Integer -> IO ()
 advanceUntilDone gb stateRef frameCounter = do
