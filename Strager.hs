@@ -13,7 +13,7 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Foldable (asum)
 import Control.Applicative (Alternative(..))
-import Data.IORef
+import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe
@@ -277,25 +277,60 @@ instance Alternative Search where
     x <|> y = Alternative x y (\r -> Pure r)
 
 -- TODO(strager)
-type Cost = Integer
+type Cost = ()
 
 type GBState = ByteString
 
 type Checkpointer c = GB -> IO c
 
+-- | The set of work to be performed by multiple threads
+-- during runSearch.
+--
+-- A WorkQueue is actually a stack. FILO order is better
+-- than FIFO order because performing work in FILO order has
+-- several important benefits, including:
+--
+-- * Killing search branches as soon as possible, therefore
+--   using significantly less memory (important!)
+-- * Utilizing CPU caches better (unmeasured)
+newtype WorkQueue a = WorkQueue (TVar [a])
+
+newWorkQueueIO :: IO (WorkQueue a)
+newWorkQueueIO = WorkQueue <$> newTVarIO []
+
+readWorkQueue :: WorkQueue a -> STM a
+readWorkQueue (WorkQueue var) = do
+    xs <- readTVar var
+    case xs of
+        [] -> retry
+        (x:xs) -> do
+            writeTVar var xs
+            return x
+
+writeWorkQueue :: WorkQueue a -> a -> STM ()
+writeWorkQueue (WorkQueue var) x = modifyTVar var (x :)
+
 runSearch :: forall a c. (Show c, Eq c, Ord c) => IO GB -> Checkpointer c -> Search a -> IO ()
 runSearch newGB checkpointer initialSearch = do
     logMutex <- newMVar ()
     checkpointsVar <- newTVarIO (Map.empty :: Map c Cost)
+
+    -- Some counters for debugging.
+    enqueuedWorkCountRef <- newIORef (0 :: Int)
+    startedWorkCountRef <- newIORef (0 :: Int)
+    completedSearchCountRef <- newIORef (0 :: Int)
+    prunedSearchCountRef <- newIORef (0 :: Int)
+    abortedSearchCountRef <- newIORef (0 :: Int)
+    savedStateCountRef <- newIORef (0 :: Int)
+
+    let incCounter counterRef = atomicModifyIORef' counterRef (\x -> (x + 1, ()))
+
     -- The queue of work to do.
-    -- TODO(strager): Search the graph in breadth-first
-    -- order so edges can be discovered (thus searched
-    -- concurrently) as soon as possible.
-    workQueue <- newTQueueIO :: IO (TQueue (Search a))
-    trackNamedSTM "set up queue" $ writeTQueue workQueue initialSearch
+    workQueue <- newWorkQueueIO :: IO (WorkQueue (Search a))
+    trackNamedSTM "set up queue" $ writeWorkQueue workQueue initialSearch
 
     let enqueue :: GBState -> Search a -> STM ()
-        enqueue state continue = writeTQueue workQueue $ do
+        enqueue state continue = writeWorkQueue workQueue $ do
             gb <- getGameboy
             liftIO $ loadState gb state
             continue
@@ -304,9 +339,12 @@ runSearch newGB checkpointer initialSearch = do
         runSearch' gb (Alternative x y continue) = do
             -- Put one side (x) into the queue so we can
             -- execute both sides concurrently.
+            -- FIXME(strager): This eats up memory!
             state <- saveState gb
             -- FIXME(strager): We also need to save the
             -- input getter.
+            incCounter savedStateCountRef
+            incCounter enqueuedWorkCountRef
             trackNamedSTM "queue alternative" $ enqueue state (x >>= continue)
             runSearch' gb (y >>= continue)
         runSearch' gb (Checkpoint continue) = do
@@ -331,9 +369,13 @@ runSearch newGB checkpointer initialSearch = do
                 -- queue so we can run lower-cost
                 -- work if necessary. Would that
                 -- cause too much context switching?
-                when isCheckpointStillNew $ runSearch' gb continue
-            else return () -- Prune.
-        runSearch' _gb Empty = return ()
+                if isCheckpointStillNew
+                then runSearch' gb continue
+                else incCounter abortedSearchCountRef
+            else incCounter abortedSearchCountRef
+        runSearch' _gb Empty = do
+            incCounter prunedSearchCountRef
+            return ()
         runSearch' gb (GetGameboy continue) = runSearch' gb (continue gb)
         runSearch' gb (LiftIO io continue) = do
             x <- io
@@ -341,17 +383,21 @@ runSearch newGB checkpointer initialSearch = do
         runSearch' gb (Log message continue) = do
             withMVar logMutex $ \() -> hPutStr stderr message
             runSearch' gb continue
-        runSearch' _gb (Pure _) = return ()
+        runSearch' _gb (Pure _) = do
+            incCounter completedSearchCountRef
+            return ()
 
     let processQueue :: GB -> IO ()
         processQueue gb = do
             let acquireWork :: IO (Search a)
                 acquireWork = trackNamedSTM "acquireWork"
-                    $ readTQueue workQueue
+                    $ readWorkQueue workQueue
             let releaseWork :: Search a -> IO ()
                 releaseWork _work = return ()
             let handleWork :: Search a -> IO ()
-                handleWork work = runSearch' gb work
+                handleWork work = do
+                    incCounter startedWorkCountRef
+                    runSearch' gb work
             bracket acquireWork releaseWork handleWork
             -- TODO(strager): Terminate this loop!
             processQueue gb
@@ -362,18 +408,22 @@ runSearch newGB checkpointer initialSearch = do
         processQueue gb
 
     -- DEBUGGING
-    forM_ [1..30] $ \_ -> do
+    forever $ do
         threadDelay (1000 * 1000)
         checkpoints <- readTVarIO checkpointsVar
-        printf "%3d checkpoints; ??? queued jobs\n" (Map.size checkpoints)
-    exitFailure
+        enqueuedWorkCount <- atomicModifyIORef' enqueuedWorkCountRef (\x -> (x, x))
+        startedWorkCount <- atomicModifyIORef' startedWorkCountRef (\x -> (x, x))
+        completedSearchCount <- atomicModifyIORef' completedSearchCountRef (\x -> (x, x))
+        prunedSearchCount <- atomicModifyIORef' prunedSearchCountRef (\x -> (x, x))
+        abortedSearchCount <- atomicModifyIORef' abortedSearchCountRef (\x -> (x, x))
+        savedStateCount <- atomicModifyIORef' savedStateCountRef (\x -> (x, x))
+        printf "%4d checkpoints; %4d enqueued works; %4d started works; %4d completed searches; %4d pruned searches; %4d aborted searches; %4d state saves\n" (Map.size checkpoints) enqueuedWorkCount startedWorkCount completedSearchCount prunedSearchCount abortedSearchCount savedStateCount
 
     mapM_ wait threads
 
     where
-    -- FIXME(strager): Is this a good cost function?
     getCost :: GB -> IO Cost
-    getCost gb = getCycleCount gb
+    getCost _gb = return ()
 
 checkpoint :: Search ()
 checkpoint = Checkpoint (Pure ())
