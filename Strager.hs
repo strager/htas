@@ -26,12 +26,14 @@ import System.IO
 import Text.Printf
 import Control.Monad.Trans.State (evalState, state)
 import Data.List (nub, permutations)
-import Control.Concurrent.STM (atomically, retry)
+import Control.Concurrent.STM (STM, atomically, retry)
 import Control.Concurrent.STM.TChan (TChan, newTChan, readTChan, writeTChan)
+import Control.Concurrent.STM.TQueue (TQueue, newTQueueIO, readTQueue, writeTQueue)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM.TVar (TVar, modifyTVar, newTVarIO, readTVar, readTVarIO, writeTVar)
 import Control.Exception (bracket)
-import Control.Concurrent.Async (async, wait)
+import Control.Concurrent (getNumCapabilities)
+import Control.Concurrent.Async (asyncOn, wait)
 import Control.Concurrent.STM.Stats (dumpSTMStats, trackNamedSTM)
 
 import HTas.Direct
@@ -275,7 +277,7 @@ instance Alternative Search where
     x <|> y = Alternative x y (\r -> Pure r)
 
 -- TODO(strager)
-type Cost = ()
+type Cost = Integer
 
 type GBState = ByteString
 
@@ -284,42 +286,52 @@ type Checkpointer c = GB -> IO c
 runSearch :: forall a c. (Show c, Eq c, Ord c) => IO GB -> Checkpointer c -> Search a -> IO ()
 runSearch newGB checkpointer initialSearch = do
     logMutex <- newMVar ()
-    checkpointsVar <- newTVarIO (Map.empty :: Map c (Cost, GBState))
-    queueVar <- newTVarIO (Heap.singleton ((), initialSearch) :: MinPrioHeap Cost (Search a))
+    checkpointsVar <- newTVarIO (Map.empty :: Map c Cost)
+    -- The queue of work to do.
+    -- TODO(strager): Search the graph in breadth-first
+    -- order so edges can be discovered (thus searched
+    -- concurrently) as soon as possible.
+    workQueue <- newTQueueIO :: IO (TQueue (Search a))
+    trackNamedSTM "set up queue" $ writeTQueue workQueue initialSearch
+
+    let enqueue :: GBState -> Search a -> STM ()
+        enqueue state continue = writeTQueue workQueue $ do
+            gb <- getGameboy
+            liftIO $ loadState gb state
+            continue
 
     let runSearch' :: GB -> Search a -> IO ()
         runSearch' gb (Alternative x y continue) = do
+            -- Put one side (x) into the queue so we can
+            -- execute both sides concurrently.
+            state <- saveState gb
             -- FIXME(strager): We also need to save the
             -- input getter.
-            -- TODO(strager): Put one side into the queue so
-            -- we can execute both sides concurrently.
-            beforeState <- saveState gb
-            runSearch' gb (x >>= \r -> continue r)
-            loadState gb beforeState
-            runSearch' gb (y >>= \r -> continue r)
+            trackNamedSTM "queue alternative" $ enqueue state (x >>= continue)
+            runSearch' gb (y >>= continue)
         runSearch' gb (Checkpoint continue) = do
             checkpoint <- checkpointer gb
             checkpoints <- readTVarIO checkpointsVar
             let isCheckpointNew = case Map.lookup checkpoint checkpoints of
                     Nothing -> True
-                    Just (_cost, _state) -> False -- TODO(strager): Pick the solution with the lower cost.
+                    Just _cost -> False -- TODO(strager): Pick the solution with the lower cost.
             if isCheckpointNew
             then do
-                let cost = () -- TODO(strager)
-                state <- saveState gb
-                trackNamedSTM "store checkpoint" $ do
+                cost <- getCost gb
+                isCheckpointStillNew <- trackNamedSTM "store checkpoint" $ do
                     checkpoints <- readTVar checkpointsVar
                     let isCheckpointStillNew = case Map.lookup checkpoint checkpoints of
                             Nothing -> True
-                            Just (_cost, _state) -> False -- TODO(strager): Pick the solution with the lower cost.
-                    when isCheckpointStillNew $ do
-                        writeTVar checkpointsVar $ Map.insert checkpoint (cost, state) checkpoints
-                        -- Breadth-first search.
-                        let continue' = do
-                                gb <- getGameboy
-                                liftIO $ loadState gb state
-                                continue
-                        modifyTVar queueVar $ Heap.insert (cost, continue')
+                            Just _cost -> False -- TODO(strager): Pick the solution with the lower cost.
+                    when isCheckpointStillNew
+                        $ writeTVar checkpointsVar $ Map.insert checkpoint cost checkpoints
+                    return isCheckpointStillNew
+                -- TODO(strager): Instead of
+                -- invoking continue, add it to the
+                -- queue so we can run lower-cost
+                -- work if necessary. Would that
+                -- cause too much context switching?
+                when isCheckpointStillNew $ runSearch' gb continue
             else return () -- Prune.
         runSearch' _gb Empty = return ()
         runSearch' gb (GetGameboy continue) = runSearch' gb (continue gb)
@@ -334,13 +346,8 @@ runSearch newGB checkpointer initialSearch = do
     let processQueue :: GB -> IO ()
         processQueue gb = do
             let acquireWork :: IO (Search a)
-                acquireWork = trackNamedSTM "acquireWork" $ do
-                    queue <- readTVar queueVar
-                    case Heap.view queue of
-                        Just ((_cost, search), queue') -> do
-                            writeTVar queueVar queue'
-                            return search
-                        Nothing -> retry
+                acquireWork = trackNamedSTM "acquireWork"
+                    $ readTQueue workQueue
             let releaseWork :: Search a -> IO ()
                 releaseWork _work = return ()
             let handleWork :: Search a -> IO ()
@@ -349,7 +356,8 @@ runSearch newGB checkpointer initialSearch = do
             -- TODO(strager): Terminate this loop!
             processQueue gb
 
-    threads <- forM [1..8] $ \_ -> async $ do
+    numCapabilities <- getNumCapabilities
+    threads <- forM [1..numCapabilities] $ \cap -> asyncOn cap $ do
         gb <- newGB
         processQueue gb
 
@@ -357,10 +365,15 @@ runSearch newGB checkpointer initialSearch = do
     forM_ [1..30] $ \_ -> do
         threadDelay (1000 * 1000)
         checkpoints <- readTVarIO checkpointsVar
-        printf "%d checkpoints\n" (Map.size checkpoints)
+        printf "%3d checkpoints; ??? queued jobs\n" (Map.size checkpoints)
     exitFailure
 
     mapM_ wait threads
+
+    where
+    -- FIXME(strager): Is this a good cost function?
+    getCost :: GB -> IO Cost
+    getCost gb = getCycleCount gb
 
 checkpoint :: Search ()
 checkpoint = Checkpoint (Pure ())
