@@ -13,7 +13,10 @@ import Foreign.C.Types
 import HTas.Direct
 import System.FilePath
 import Text.Printf
-import Debug.Trace (traceEventIO)
+
+--import Debug.Trace (traceEventIO)
+traceEventIO :: String -> IO ()
+traceEventIO _message = return ()
 
 create :: IO GB
 create = gambatte_create
