@@ -177,6 +177,7 @@ dugtrio = do
             liftIO $ bufferedStep gb inputRef input
             bonked <- liftIO $ (== 0xB4) <$> cpuRead gb 0xC02A
             when bonked prune
+            unless (input `hasAllInput` i_A) checkpoint
             return input
 
     let tryStepA input = tryStep input <|> tryStep (input <> i_A)
@@ -186,8 +187,8 @@ dugtrio = do
 
     let tryStepsPressingAArbitrarily [] _aPressesAllowed = return []
         tryStepsPressingAArbitrarily (input : remainingInputs) aPressesAllowed
-            | aPressesAllowed == 0 = tryStepWithoutA <* checkpoint
-            | otherwise = tryStepWithoutA <|> tryStepWithA <* checkpoint
+            | aPressesAllowed == 0 = tryStepWithoutA
+            | otherwise = tryStepWithoutA <|> tryStepWithA
             where
             tryStepWithoutA = ((:) <$> tryStep input <*> tryStepsPressingAArbitrarily remainingInputs aPressesAllowed)
             tryStepWithA = ((:) <$> tryStep (input <> i_A) <*> tryStepsPressingAArbitrarily remainingInputs (aPressesAllowed - 1))
@@ -211,7 +212,6 @@ dugtrio = do
         s4 <- tryStepA i_Up <* expectMap diglettCaveEntranceBMap
         s5 <- tryStepA i_Right <* expectMap diglettCaveMap
         return [s1, s2, s3, s4, s5]
-    checkpoint
 
 {-
     let segment2Paths = do
@@ -242,11 +242,8 @@ dugtrio = do
                     encounter <- liftIO $ readEncounter gb
                     -- log $ printf "%s\n" (show encounter)
                     unless (species encounter == 118 && level encounter == 31) prune
-                    checkpoint
                     return ([step], encounter)
                 else do
-                    cp <- liftIO $ redCheckpointer gb
-                    checkpoint
                     (path, encounter) <- loop (parentPath ++ [step]) (depth + 1)
                     return (step : path, encounter)
         loop [] (0 :: Int)

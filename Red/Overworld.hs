@@ -69,11 +69,12 @@ bufferedWalk gb inRef inps =
         count <- cpuRead gb wWalkCounter
         inBattle <- cpuRead gb wIsInBattle
         bonked <- (== 0xB4) <$> cpuRead gb 0xC02A
+        {-
         when (count == 0 && (input `hasAllInput` i_A)) $ do
           -- HACK(strager)
           writeIORef inRef mempty
           advanceFrame gb
-          advanceFrame gb
+          advanceFrame gb -}
         if count == 0 || inBattle /= 0 || bonked
         then pure ()
         else do
