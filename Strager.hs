@@ -97,7 +97,7 @@ main :: IO ()
 main = do
     baseSave <- BS.readFile "pokered_dugtrio3.sav"
 
-    runSearch newGB checkpointer $ do
+    runSearch newGB redCheckpointer $ do
         _frame <- asum $ for [0] $ \frame -> do
             gb <- getGameboy
             liftIO $ loadSaveData gb (setSaveFrames frame baseSave)
@@ -114,28 +114,32 @@ main = do
         loadRomFile gb "pokered.gbc"
         return gb
 
-    checkpointer :: GB -> IO RedCheckpoint
-    checkpointer gb = do
-        encountered <- (/= 0) <$> cpuRead gb wIsInBattle
-        encounter <- if encountered
-            then Just <$> readEncounter gb
-            else return Nothing
+redCheckpointer :: GB -> IO RedCheckpoint
+redCheckpointer gb = do
+    encountered <- (/= 0) <$> cpuRead gb wIsInBattle
+    if encountered
+    then RedCheckpointEncounter <$> readEncounter gb
+    else do
         location <- getLocation gb
         rngState <- readRNGState gb
-        return RedCheckpoint
-            { checkpointEncounter = encounter
-            , checkpointLocation = location
+        spritesBytes <- forM [0] $ \spriteIndex
+            -> forM [0..9] $ \i
+                -> cpuRead gb $ 0xC100 + (spriteIndex * 0x10) + i
+        return RedCheckpointOverworld
+            { checkpointLocation = location
             , checkpointRNGState = rngState
+            , checkpointSprites = concat spritesBytes
             }
 
-data RedCheckpoint = RedCheckpoint
-    { checkpointEncounter :: Maybe Encounter
-    , checkpointLocation :: Location
+data RedCheckpoint
+    = RedCheckpointOverworld
+    { checkpointLocation :: Location
     , checkpointRNGState :: (Word8, Word8, Word8)
+    , checkpointSprites :: [Word8]
     -- TODO(strager): Checkpoint object timers.
-    -- TODO(strager): Checkpoint the direction the player is facing.
     -- TODO(strager): Checkpoint the in-game timer.
     }
+    | RedCheckpointEncounter Encounter
     deriving (Eq, Ord, Show)
 
 prune :: Search a
@@ -256,6 +260,7 @@ data Search a where
     Checkpoint :: Search a -> Search a
     Empty :: Search a
     GetGameboy :: (GB -> Search a) -> Search a
+    IsRedundant :: (Bool -> Search a) -> Search a
     LiftIO :: IO a -> (a -> Search b) -> Search b
     Log :: String -> Search a -> Search a
     Pure :: a -> Search a
@@ -272,6 +277,7 @@ instance Monad Search where
     Checkpoint continue >>= continue' = Checkpoint (continue >>= continue')
     Empty >>= _ = Empty
     GetGameboy continue >>= continue' = GetGameboy (\gb -> continue gb >>= continue')
+    IsRedundant continue >>= continue' = IsRedundant (\is -> continue is >>= continue')
     LiftIO io continue >>= continue' = LiftIO io (\r -> continue r >>= continue')
     Log message continue >>= continue' = Log message (continue >>= continue')
     Pure x >>= continue' = continue' x
@@ -394,6 +400,13 @@ runSearch newGB checkpointer initialSearch = do
             incCounter prunedSearchCountRef
             return ()
         runSearch' gb (GetGameboy continue) = runSearch' gb (continue gb)
+        runSearch' gb (IsRedundant continue) = do
+            checkpoint <- checkpointer gb
+            checkpoints <- readTVarIO checkpointsVar
+            let isCheckpointNew = case Map.lookup checkpoint checkpoints of
+                    Nothing -> True
+                    Just _cost -> False -- TODO(strager): Pick the solution with the lower cost.
+            runSearch' gb $ continue (not isCheckpointNew)
         runSearch' gb (LiftIO io continue) = do
             x <- io
             runSearch' gb (continue x)
@@ -447,6 +460,9 @@ checkpoint = Checkpoint (Pure ())
 
 getGameboy :: Search GB
 getGameboy = GetGameboy (\gb -> Pure gb)
+
+isRedundant :: Search Bool
+isRedundant = IsRedundant (\is -> Pure is)
 
 log :: String -> Search ()
 log message = Log message (Pure ())
