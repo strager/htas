@@ -181,9 +181,6 @@ dugtrio = do
             return input
 
     let tryStepA input = tryStep input <|> tryStep (input <> i_A)
-    --let tryStepA input = tryStep (input <> i_A)
-
-    let getCP = getGameboy >>= liftIO . redCheckpointer
 
     let tryStepsPressingAArbitrarily [] _aPressesAllowed = return []
         tryStepsPressingAArbitrarily (input : remainingInputs) aPressesAllowed
@@ -195,12 +192,6 @@ dugtrio = do
 
     segment1Path <- tryStepsPressingAArbitrarily (replicate 21 i_Right) 2
     expectMap route11Map
-    {-
-    do
-        cp <- getCP
-        log $ printf "ouch %s %s\n" (show cp) (show segment1Path)
-    checkpoint
-        -}
     let segment2Path = []
     segment3Step <- tryStep i_Up <* expectMap diglettCaveEntranceBMap
     let segment3Path = [segment3Step]
@@ -231,8 +222,8 @@ dugtrio = do
             -}
 
     (segment5Path, encounter) <- do
-        let loop parentPath depth = do
-                when (depth > 7) prune
+        let loop depth = do
+                when (depth >= 7) prune
                 step <- tryStepA i_Up <|> tryStepA i_Down <|> tryStepA i_Left
                 expectMap diglettCaveMap
                 gb <- getGameboy
@@ -240,13 +231,13 @@ dugtrio = do
                 if encountered
                 then do
                     encounter <- liftIO $ readEncounter gb
-                    -- log $ printf "%s\n" (show encounter)
                     unless (species encounter == 118 && level encounter == 31) prune
                     return ([step], encounter)
                 else do
-                    (path, encounter) <- loop (parentPath ++ [step]) (depth + 1)
+                    (path, encounter) <- loop (depth + 1)
                     return (step : path, encounter)
-        loop [] (0 :: Int)
+        loop (1 :: Int)
+    checkpoint
 
     let paths = [segment1Path, segment2Path, segment3Path, segment4Path, segment5Path]
     log $ printf "Found encounter: %s\n%s" (show encounter)
