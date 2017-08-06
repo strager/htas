@@ -14,8 +14,8 @@ import qualified Data.ByteString as BS
 import Data.Foldable (asum)
 import Control.Applicative (Alternative(..))
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
-import Data.Map (Map)
-import qualified Data.Map as Map
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.Monoid
 import Data.Vector (Vector)
@@ -68,8 +68,6 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Foldable
 import Data.IORef
-import Data.Map (Map)
-import qualified Data.Map as Map
 import Data.Maybe
 import Data.Monoid
 import Data.Vector (Vector)
@@ -165,29 +163,23 @@ diglettCaveEntranceBMap = 85
 diglettCaveMap :: Word8
 diglettCaveMap = 197
 
-data Path = Path Input Paths
-
--- Invariant:
---
--- isUnique :: (Eq a) => [a] -> Bool
--- isUnique xs = length (nub xs) == length xs
---
--- invariant :: Paths -> Bool
--- invariant (Paths paths) = isUnique
---   $ map (\(Path input _) -> input) paths
-data Paths = Paths [Path]
+data Paths = Paths (Map Input Paths)
 
 data Pos = Pos !Int !Int
+
+unionPaths :: Paths -> Paths -> Paths
+unionPaths (Paths xs) (Paths ys)
+    = Paths $ Map.unionWith unionPaths xs ys
 
 consIf :: Bool -> a -> [a] -> [a]
 consIf True x xs = x : xs
 consIf False _x xs = xs
 
 pathsBetween :: (Pos -> Input -> Bool) -> Pos -> Pos -> Paths
-pathsBetween canStep from to = Paths $ do
+pathsBetween canStep from to = Paths $ Map.fromList $ do
     (input, pos') <- steps from to
     unless (canStep from input) []
-    return $ Path input (pathsBetween canStep pos' to)
+    return (input, pathsBetween canStep pos' to)
     where
     steps :: Pos -> Pos -> [(Input, Pos)]
     steps (Pos fromX fromY) (Pos toX toY)
@@ -196,6 +188,18 @@ pathsBetween canStep from to = Paths $ do
         $ consIf (fromX > toX) (i_Left, Pos (fromX - 1) fromY)
         $ consIf (fromY > toY) (i_Up, Pos fromX (fromY - 1))
         []
+
+appendPaths :: Paths -> Paths -> Paths
+appendPaths (Paths paths) nextPaths
+    | Map.null paths = nextPaths
+    | otherwise = Paths $ Map.map (\xs -> appendPaths xs nextPaths) paths
+
+pressAArbitrarily :: Int -> Paths -> Paths
+pressAArbitrarily maximumAPresses paths@(Paths xs)
+    | maximumAPresses == 0 = paths
+    | otherwise = unionPaths paths aPaths
+    where
+    aPaths = Paths $ Map.mapKeysWith unionPaths (<> i_A) xs
 
 dugtrio :: Search ()
 dugtrio = do
@@ -215,28 +219,33 @@ dugtrio = do
     -- HACK(strager): We let bonk pruning abort bad paths.
     let canStep _pos _input = True
 
-    let runPath :: Path -> Search [Input]
-        runPath (Path input nextPaths) = (:) <$> tryStep input <*> runPaths nextPaths
+    let runPath :: Input -> Paths -> Search [Input]
+        runPath input nextPaths = (:) <$> tryStep input <*> runPaths nextPaths
         runPaths :: Paths -> Search [Input]
-        runPaths (Paths paths) = foldr (<|>) (return []) $ map runPath paths
+        runPaths (Paths paths) = Map.foldr (<|>) (return []) $ Map.mapWithKey runPath paths
 
-    --let tryStepA input = tryStep input <|> tryStep (input <> i_A)
-
-    segment1Steps <- runPaths $ pathsBetween canStep (Pos 0 0) (Pos 21 (-1))
+    segment1Steps <- runPaths $ pressAArbitrarily 2 $ foldr1 unionPaths
+        [ pathsBetween canStep (Pos 0 0) (Pos 21 (-1))
+        , pathsBetween canStep (Pos 0 0) (Pos 15 1) `appendPaths` pathsBetween canStep (Pos 15 1) (Pos 21 (-1))
+        ]
     expectMap diglettCaveEntranceBMap
     let segment1Path = segment1Steps
 
     let segment2Path = []
     let segment3Path = []
 
-    segment4Steps <- runPaths $ pathsBetween canStep (Pos 0 0) (Pos 2 (-3))
+    segment4Steps <- runPaths $ pressAArbitrarily 1 $ foldr1 unionPaths
+        [ pathsBetween canStep (Pos 0 0) (Pos 2 (-3))
+        , pathsBetween canStep (Pos 0 0) (Pos (-1) (-5)) `appendPaths` pathsBetween canStep (Pos (-1) (-5)) (Pos 2 (-3))
+        ]
     expectMap diglettCaveMap
     let segment4Path = segment4Steps
 
     (segment5Path, encounter) <- do
+        let tryStepA input = tryStep input <|> tryStep (input <> i_A)
         let loop depth = do
-                when (depth >= 9) prune
-                step <- tryStep i_Up <|> tryStep i_Down <|> tryStep i_Left
+                when (depth >= 6) prune
+                step <- tryStepA i_Up <|> tryStepA i_Down <|> tryStepA i_Left
                 expectMap diglettCaveMap
                 gb <- getGameboy
                 encountered <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
