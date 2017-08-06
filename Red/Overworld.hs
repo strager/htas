@@ -1,6 +1,6 @@
 module Red.Overworld where
 
-import Control.Monad (unless)
+import Control.Monad (unless, when, replicateM_)
 import Data.Bits ((.&.))
 import Data.IORef
 import Data.Word
@@ -15,6 +15,8 @@ wCurMap = 0xD35E
 wWalkCounter = 0xCFC5
 
 wIsInBattle = 0xD057
+
+hJoyPressed = 0xFFB2
 
 data Location = Location
     { locMap :: Word8
@@ -50,11 +52,11 @@ bufferedWalk gb inRef inps =
                 -- TODO(strager): Stop if we open a menu
                 -- (e.g. by talking to a sign).
                 writeIORef inRef d
-                waitForWalkStart gb
-                waitForStep gb
+                waitForWalkStart gb d
+                waitForStep gb d
                 bufferedWalk gb inRef ds
     where
-    waitForWalkStart gb = do
+    waitForWalkStart gb input = do
         count <- cpuRead gb wWalkCounter
         inBattle <- cpuRead gb wIsInBattle
         bonked <- (== 0xB4) <$> cpuRead gb 0xC02A
@@ -62,15 +64,21 @@ bufferedWalk gb inRef inps =
         then pure ()
         else do
             advanceFrame gb
-            waitForWalkStart gb
-    waitForStep gb = do
+            waitForWalkStart gb input
+    waitForStep gb input = do
         count <- cpuRead gb wWalkCounter
         inBattle <- cpuRead gb wIsInBattle
-        if count == 0 || inBattle /= 0
+        bonked <- (== 0xB4) <$> cpuRead gb 0xC02A
+        when (count == 0 && (input `hasAllInput` i_A)) $ do
+          -- HACK(strager)
+          writeIORef inRef mempty
+          advanceFrame gb
+          advanceFrame gb
+        if count == 0 || inBattle /= 0 || bonked
         then pure ()
         else do
             advanceFrame gb
-            waitForStep gb
+            waitForStep gb input
 
 waitForItemJingle :: GB -> IO ()
 waitForItemJingle gb = advanceUntil gb $ do

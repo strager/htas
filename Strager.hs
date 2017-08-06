@@ -171,25 +171,33 @@ dugtrio = do
             gb <- getGameboy
             liftIO $ setInputGetter gb (readIORef inputRef)
             liftIO $ bufferedStep gb inputRef input
+            bonked <- liftIO $ (== 0xB4) <$> cpuRead gb 0xC02A
+            when bonked prune
             return input
 
     let tryStepA input = tryStep input <|> tryStep (input <> i_A)
+    --let tryStepA input = tryStep (input <> i_A)
+
+    let getCP = getGameboy >>= liftIO . redCheckpointer
 
     let tryStepsPressingAArbitrarily [] _aPressesAllowed = return []
         tryStepsPressingAArbitrarily (input : remainingInputs) aPressesAllowed
-            | aPressesAllowed == 0 = tryStepWithoutA <* maybeCheckpoint
-            | otherwise = tryStepWithoutA <|> tryStepWithA <* maybeCheckpoint
+            | aPressesAllowed == 0 = tryStepWithoutA <* checkpoint
+            | otherwise = tryStepWithoutA <|> tryStepWithA <* checkpoint
             where
-            maybeCheckpoint
-                | length remainingInputs `mod` 4 == 0 = checkpoint
-                | otherwise = return ()
             tryStepWithoutA = ((:) <$> tryStep input <*> tryStepsPressingAArbitrarily remainingInputs aPressesAllowed)
             tryStepWithA = ((:) <$> tryStep (input <> i_A) <*> tryStepsPressingAArbitrarily remainingInputs (aPressesAllowed - 1))
 
     segment1Path <- tryStepsPressingAArbitrarily (replicate 21 i_Right) 2
     expectMap route11Map
+    {-
+    do
+        cp <- getCP
+        log $ printf "ouch %s %s\n" (show cp) (show segment1Path)
+    checkpoint
+        -}
     let segment2Path = []
-    segment3Step <- tryStepA i_Up <* expectMap diglettCaveEntranceBMap
+    segment3Step <- tryStep i_Up <* expectMap diglettCaveEntranceBMap
     let segment3Path = [segment3Step]
 
     segment4Path <- do
@@ -219,7 +227,7 @@ dugtrio = do
             -}
 
     (segment5Path, encounter) <- do
-        let loop depth = do
+        let loop parentPath depth = do
                 when (depth > 7) prune
                 step <- tryStepA i_Up <|> tryStepA i_Down <|> tryStepA i_Left
                 expectMap diglettCaveMap
@@ -233,10 +241,11 @@ dugtrio = do
                     checkpoint
                     return ([step], encounter)
                 else do
-                    --checkpoint -- FIXME(strager): Why doesn't this work?
-                    (path, encounter) <- loop (depth + 1)
+                    cp <- liftIO $ redCheckpointer gb
+                    checkpoint
+                    (path, encounter) <- loop (parentPath ++ [step]) (depth + 1)
                     return (step : path, encounter)
-        loop 0
+        loop [] (0 :: Int)
 
     let paths = [segment1Path, segment2Path, segment3Path, segment4Path, segment5Path]
     log $ printf "Found encounter: %s\n%s" (show encounter)
@@ -313,6 +322,10 @@ writeWorkQueue (WorkQueue var) x = modifyTVar var (x :)
 runSearch :: forall a c. (Show c, Eq c, Ord c) => IO GB -> Checkpointer c -> Search a -> IO ()
 runSearch newGB checkpointer initialSearch = do
     logMutex <- newMVar ()
+    let log message = do
+            tid <- myThreadId
+            withMVar logMutex $ \() -> hPutStr stderr $ printf "[%s] %s" (show tid) message
+
     checkpointsVar <- newTVarIO (Map.empty :: Map c Cost)
 
     -- Some counters for debugging.
@@ -371,8 +384,12 @@ runSearch newGB checkpointer initialSearch = do
                 -- cause too much context switching?
                 if isCheckpointStillNew
                 then runSearch' gb continue
-                else incCounter abortedSearchCountRef
-            else incCounter abortedSearchCountRef
+                else do
+                    --log "aborted\n"
+                    incCounter abortedSearchCountRef
+            else do
+                --log "aborted\n"
+                incCounter abortedSearchCountRef
         runSearch' _gb Empty = do
             incCounter prunedSearchCountRef
             return ()
@@ -381,7 +398,7 @@ runSearch newGB checkpointer initialSearch = do
             x <- io
             runSearch' gb (continue x)
         runSearch' gb (Log message continue) = do
-            withMVar logMutex $ \() -> hPutStr stderr message
+            log message
             runSearch' gb continue
         runSearch' _gb (Pure _) = do
             incCounter completedSearchCountRef
@@ -417,7 +434,7 @@ runSearch newGB checkpointer initialSearch = do
         prunedSearchCount <- atomicModifyIORef' prunedSearchCountRef (\x -> (x, x))
         abortedSearchCount <- atomicModifyIORef' abortedSearchCountRef (\x -> (x, x))
         savedStateCount <- atomicModifyIORef' savedStateCountRef (\x -> (x, x))
-        printf "%4d checkpoints; %4d enqueued works; %4d started works; %4d completed searches; %4d pruned searches; %4d aborted searches; %4d state saves\n" (Map.size checkpoints) enqueuedWorkCount startedWorkCount completedSearchCount prunedSearchCount abortedSearchCount savedStateCount
+        log $ printf "%6d checkpoints; %6d enqueued works; %6d started works; %6d completed searches; %6d pruned searches; %6d aborted searches; %6d state saves\n" (Map.size checkpoints) enqueuedWorkCount startedWorkCount completedSearchCount prunedSearchCount abortedSearchCount savedStateCount
 
     mapM_ wait threads
 
