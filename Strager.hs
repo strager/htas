@@ -165,6 +165,38 @@ diglettCaveEntranceBMap = 85
 diglettCaveMap :: Word8
 diglettCaveMap = 197
 
+data Path = Path Input Paths
+
+-- Invariant:
+--
+-- isUnique :: (Eq a) => [a] -> Bool
+-- isUnique xs = length (nub xs) == length xs
+--
+-- invariant :: Paths -> Bool
+-- invariant (Paths paths) = isUnique
+--   $ map (\(Path input _) -> input) paths
+data Paths = Paths [Path]
+
+data Pos = Pos !Int !Int
+
+consIf :: Bool -> a -> [a] -> [a]
+consIf True x xs = x : xs
+consIf False _x xs = xs
+
+pathsBetween :: (Pos -> Input -> Bool) -> Pos -> Pos -> Paths
+pathsBetween canStep from to = Paths $ do
+    (input, pos') <- steps from to
+    unless (canStep from input) []
+    return $ Path input (pathsBetween canStep pos' to)
+    where
+    steps :: Pos -> Pos -> [(Input, Pos)]
+    steps (Pos fromX fromY) (Pos toX toY)
+        = consIf (fromX < toX) (i_Right, Pos (fromX + 1) fromY)
+        $ consIf (fromY < toY) (i_Down, Pos fromX (fromY + 1))
+        $ consIf (fromX > toX) (i_Left, Pos (fromX - 1) fromY)
+        $ consIf (fromY > toY) (i_Up, Pos fromX (fromY - 1))
+        []
+
 dugtrio :: Search ()
 dugtrio = do
     -- TODO(strager): Prune if we're not at the expected
@@ -176,55 +208,35 @@ dugtrio = do
             liftIO $ setInputGetter gb (readIORef inputRef)
             liftIO $ bufferedStep gb inputRef input
             bonked <- liftIO $ (== 0xB4) <$> cpuRead gb 0xC02A
-            when bonked prune
+            when bonked $ prune
             unless (input `hasAllInput` i_A) checkpoint
             return input
 
-    let tryStepA input = tryStep input <|> tryStep (input <> i_A)
+    -- HACK(strager): We let bonk pruning abort bad paths.
+    let canStep _pos _input = True
 
-    let tryStepsPressingAArbitrarily [] _aPressesAllowed = return []
-        tryStepsPressingAArbitrarily (input : remainingInputs) aPressesAllowed
-            | aPressesAllowed == 0 = tryStepWithoutA
-            | otherwise = tryStepWithoutA <|> tryStepWithA
-            where
-            tryStepWithoutA = ((:) <$> tryStep input <*> tryStepsPressingAArbitrarily remainingInputs aPressesAllowed)
-            tryStepWithA = ((:) <$> tryStep (input <> i_A) <*> tryStepsPressingAArbitrarily remainingInputs (aPressesAllowed - 1))
+    let runPath :: Path -> Search [Input]
+        runPath (Path input nextPaths) = (:) <$> tryStep input <*> runPaths nextPaths
+        runPaths :: Paths -> Search [Input]
+        runPaths (Paths paths) = foldr (<|>) (return []) $ map runPath paths
 
-    segment1Path <- tryStepsPressingAArbitrarily (replicate 21 i_Right) 2
-    expectMap route11Map
+    --let tryStepA input = tryStep input <|> tryStep (input <> i_A)
+
+    segment1Steps <- runPaths $ pathsBetween canStep (Pos 0 0) (Pos 21 (-1))
+    expectMap diglettCaveEntranceBMap
+    let segment1Path = segment1Steps
+
     let segment2Path = []
-    segment3Step <- tryStep i_Up <* expectMap diglettCaveEntranceBMap
-    let segment3Path = [segment3Step]
+    let segment3Path = []
 
-    segment4Path <- do
-        s1 <- tryStepA i_Up <* expectMap diglettCaveEntranceBMap
-        s2 <- tryStepA i_Up <* expectMap diglettCaveEntranceBMap
-        s3 <- tryStepA i_Right <* expectMap diglettCaveEntranceBMap
-        s4 <- tryStepA i_Up <* expectMap diglettCaveEntranceBMap
-        s5 <- tryStepA i_Right <* expectMap diglettCaveMap
-        return [s1, s2, s3, s4, s5]
-
-{-
-    let segment2Paths = do
-            basePath <- concat
-              [ map (i_Up :) $ nub $ permutations [i_Up, i_Up, i_Right, i_Right]
-              , map (\path -> i_Right : i_Up : path) $ nub $ permutations [i_Up, i_Up, i_Right]
-              ]
-            let aPaths = pressAArbitrarily basePath
-            -- Don't press A if we would interact with the
-            -- dude.
-            let aPaths' = filter (\path -> not $
-                    (path !! 0) `hasAllInput` i_Up &&
-                    (path !! 1) `hasAllInput` i_Up &&
-                    (path !! 2) `hasAllInput` i_Up &&
-                    (path !! 3) `hasAllInput` i_A) aPaths
-            aPaths'
-            -}
+    segment4Steps <- runPaths $ pathsBetween canStep (Pos 0 0) (Pos 2 (-3))
+    expectMap diglettCaveMap
+    let segment4Path = segment4Steps
 
     (segment5Path, encounter) <- do
         let loop depth = do
-                when (depth >= 7) prune
-                step <- tryStepA i_Up <|> tryStepA i_Down <|> tryStepA i_Left
+                when (depth >= 9) prune
+                step <- tryStep i_Up <|> tryStep i_Down <|> tryStep i_Left
                 expectMap diglettCaveMap
                 gb <- getGameboy
                 encountered <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
