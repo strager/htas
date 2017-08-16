@@ -1,11 +1,13 @@
 module Red.Overworld where
 
 import Control.Monad (unless, when, replicateM_)
-import Data.Bits ((.&.))
+import Data.Bits ((.&.), testBit)
 import Data.IORef
 import Data.Word
 import HTas.Low
 import HTas.Direct (GB)
+
+wFlags_D733 = 0xD732
 
 wYCoord = 0xD360
 wXCoord = 0xD361
@@ -35,6 +37,11 @@ getLocation gb = do
         , locY = y
         }
 
+trainerEncounter :: GB -> IO Bool
+trainerEncounter gb = do
+    flags <- cpuRead gb wFlags_D733
+    return (testBit flags 3)
+
 bufferedStep :: GB -> IORef Input -> Input -> IO ()
 bufferedStep gb inputRef input = bufferedWalk gb inputRef [input]
 
@@ -60,7 +67,8 @@ bufferedWalk gb inRef inps =
         count <- cpuRead gb wWalkCounter
         inBattle <- cpuRead gb wIsInBattle
         bonked <- (== 0xB4) <$> cpuRead gb 0xC02A
-        if count == 7 || inBattle /= 0 || bonked
+        trainer <- trainerEncounter gb
+        if count == 7 || inBattle /= 0 || bonked || trainer
         then pure ()
         else do
             advanceFrame gb
@@ -69,13 +77,14 @@ bufferedWalk gb inRef inps =
         count <- cpuRead gb wWalkCounter
         inBattle <- cpuRead gb wIsInBattle
         bonked <- (== 0xB4) <$> cpuRead gb 0xC02A
+        trainer <- trainerEncounter gb
         {-
         when (count == 0 && (input `hasAllInput` i_A)) $ do
           -- HACK(strager)
           writeIORef inRef mempty
           advanceFrame gb
           advanceFrame gb -}
-        if count == 0 || inBattle /= 0 || bonked
+        if count == 0 || inBattle /= 0 || bonked || trainer
         then pure ()
         else do
             advanceFrame gb

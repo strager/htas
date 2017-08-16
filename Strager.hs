@@ -133,10 +133,9 @@ redCheckpointer gb = do
 data RedCheckpoint
     = RedCheckpointOverworld
     { checkpointLocation :: Location
-    , checkpointRNGState :: (Word8, Word8, Word8)
+    , checkpointRNGState :: [Word8]
     , checkpointSprites :: [Word8]
     -- TODO(strager): Checkpoint object timers.
-    -- TODO(strager): Checkpoint the in-game timer.
     }
     | RedCheckpointEncounter Encounter
     deriving (Eq, Ord, Show)
@@ -149,6 +148,14 @@ expectMap map = do
     gb <- getGameboy
     location <- liftIO $ getLocation gb
     when (locMap location /= map) $ do
+        -- log $ printf "expected %d got %d\n" map (locMap location)
+        prune
+
+expectLocation :: Location -> Search ()
+expectLocation location = do
+    gb <- getGameboy
+    actualLocation <- liftIO $ getLocation gb
+    when (location /= actualLocation) $ do
         -- log $ printf "expected %d got %d\n" map (locMap location)
         prune
 
@@ -213,8 +220,12 @@ mtMoon = do
             liftIO $ setInputGetter gb (readIORef inputRef)
             liftIO $ bufferedStep gb inputRef input
             bonked <- liftIO $ (== 0xB4) <$> cpuRead gb 0xC02A
-            when bonked $ prune
-            -- unless (input `hasAllInput` i_A) checkpoint
+            when bonked prune
+            trainer <- liftIO $ trainerEncounter gb
+            when trainer prune
+            encountered <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
+            when encountered prune
+            unless (input `hasAllInput` i_A) checkpoint
             return input
 
     -- HACK(strager): We let bonk pruning abort bad paths.
@@ -228,17 +239,43 @@ mtMoon = do
             else Data.Foldable.foldr1 (<|>) $ Map.mapWithKey runPath paths
 
     segment1Path <- runPaths $
-        pressAArbitrarily 2 (pathsBetween canStep (Pos 14 35) (Pos 14 22) `appendPaths` pathsBetween canStep (Pos 14 22) (Pos 20 22))
+        pressAArbitrarily 1 (pathsBetween canStep (Pos 14 35) (Pos 14 22) `appendPaths` pathsBetween canStep (Pos 14 22) (Pos 20 22))
+    expectLocation $ Location 59 20 22
+    segment2Path <- runPaths $
+        pressAArbitrarily 1 (pathsBetween canStep (Pos 20 22) (Pos 31 10))
+    expectLocation $ Location 59 31 10
+    segment3Path <- runPaths $
+        pressAArbitrarily 1 (pathsBetween canStep (Pos 31 10) (Pos 31 3) `appendPaths` pathsBetween canStep (Pos 31 3) (Pos 16 8))
+    expectLocation $ Location 59 16 8
+    segment4Path <- runPaths $
+        pressAArbitrarily 1 (pathsBetween canStep (Pos 16 8) (Pos 12 17) `appendPaths` pathsBetween canStep (Pos 12 17) (Pos 5 5))
+    expectLocation $ Location 60 5 5
+    segment5Path <- runPaths $
+        pressAArbitrarily 1 (pathsBetween canStep (Pos 5 5) (Pos 21 17))
+    expectLocation $ Location 61 21 17
+    segment6Path <- runPaths $
+        pressAArbitrarily 1 (pathsBetween canStep (Pos 21 17) (Pos 26 14) `appendPaths` pathsBetween canStep (Pos 26 14) (Pos 32 16) `appendPaths` pathsBetween canStep (Pos 32 16) (Pos 36 14))
+    expectLocation $ Location 61 36 14
+    segment7Path <- runPaths $
+        -- TODO(strager): Check other possible paths.
+        pressAArbitrarily 1 (pathsBetween canStep (Pos 36 14) (Pos 34 24) `appendPaths` pathsBetween canStep (Pos 34 24) (Pos 11 31))
+    expectLocation $ Location 61 11 31
+    segment8Path <- runPaths $
+        pressAArbitrarily 1 (pathsBetween canStep (Pos 11 31) (Pos 12 9))
+    expectLocation $ Location 61 12 9
 
-    do
-        gb <- getGameboy
-        encountered <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
-        when encountered prune
-        location <- liftIO $ getLocation gb
-        log $ printf "%s\n" (show location)
+    let waitForEncounter c
+            | c == 0 = return ()
+            | otherwise = do
+                gb <- getGameboy
+                encounter <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
+                unless encounter $ do
+                    liftIO $ advanceFrame gb
+                    waitForEncounter (c - 1)
+    waitForEncounter 120
 
-    let paths = [segment1Path]
-    log $ printf "Found path:\n%s"
+    let paths = [segment1Path, segment2Path, segment3Path, segment4Path, segment5Path, segment6Path, segment7Path, segment8Path]
+    log $ printf "Found path (%d A-s):\n%s" (sum $ map (length . filter (\p -> p `hasAllInput` i_A)) paths)
         $ concat (map (\path -> printf " - %s\n" (show path) :: String) paths)
 
 data Search a where
@@ -487,9 +524,10 @@ readEncounter gb = do
         , specialDV = dv2 .&. 0xF
         }
 
-readRNGState :: GB -> IO (Word8, Word8, Word8)
+readRNGState :: GB -> IO [Word8]
 readRNGState gb = do
     add <- cpuRead gb 0xFFD3
     sub <- cpuRead gb 0xFFD4
     div <- cpuRead gb 0xFF04
-    return (add, sub, div)
+    timers <- forM [0xDA40..0xDA44] $ cpuRead gb
+    return $ [add, sub, div] ++ timers

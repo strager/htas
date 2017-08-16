@@ -32,8 +32,8 @@ main = do
     hSetBuffering stdout NoBuffering
 
     gb <- create
-    loadRomFile gb "pokered.gbc"
-    dat <- BS.readFile "pokered_fbee.sav"
+    loadRomFile gb "pokeyellow.gbc"
+    dat <- BS.readFile "pokeyellow_mt_moon.sav"
 
     inputRef <- newIORef mempty
 
@@ -54,17 +54,30 @@ fbeeNidoManip gb inputRef = do
     setInputGetter gb (readIORef inputRef)
     clearTraceCallback gb
 
-    bufferedWalk gb inputRef . rleExpand $
-        [ (i_Left, 8)
-        , (i_Right, 3)
-        , (i_Left, 7)
-        , (i_Down, 3)
-        , (i_Left, 2)
-        , (i_Up, 4)
-        ] <> cycle [(i_Down, 3), (i_Up, 3)]
+    bufferedWalk gb inputRef $ concat
+        [ [i_Up,i_Up<>i_A,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right]
+        , [i_Up<>i_A,i_Right,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right]
+        , [i_Up,i_Up,i_Up,i_Up<>i_A,i_Up,i_Up,i_Up,i_Left,i_Left,i_Left,i_Left,i_Down,i_Down,i_Down,i_Down,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Down]
+        , [i_Down<>i_A,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Left,i_Left,i_Left,i_Left,i_Left,i_Up,i_Up,i_Up,i_Up,i_Left,i_Left,i_Up,i_Up,i_Up,i_Up,i_Left,i_Up,i_Up,i_Up,i_Up,i_Left,i_Left,i_Left]
+        , [i_Down<>i_A,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right]
+        , [i_Up<>i_A,i_Up,i_Up,i_Right,i_Right,i_Right,i_Right,i_Right,i_Down,i_Down,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Up,i_Up,i_Right,i_Right,i_Right,i_Right]
+        , [i_Down<>i_A,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Left,i_Left,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left]
+        , [i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Right,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up]
+        ]
+    writeIORef inputRef mempty
+
     loc <- getLocation gb
-    encData <- getEncounterData gb
-    pure (loc, Just encData)
+    let waitForEncounter c
+            | c == 0 = return Nothing
+            | otherwise = do
+                encounter <- (/= 0) <$> cpuRead gb wIsInBattle
+                if encounter
+                then Just <$> getEncounterData gb
+                else do
+                    advanceFrame gb
+                    waitForEncounter (c - 1)
+    encData <- waitForEncounter 120
+    pure (loc, encData)
 
 setSaveFrames :: Word8 -> ByteString -> ByteString
 setSaveFrames f dat =
@@ -76,7 +89,7 @@ setSaveFrames f dat =
 
 getEncounterData :: GB -> IO (Word8, Word8, Word8, Word8)
 getEncounterData gb = do
-    advanceUntil gb ((/= 0) <$> cpuRead gb wIsInBattle)
+    --advanceUntil gb ((/= 0) <$> cpuRead gb wIsInBattle)
     species <- cpuRead gb wEnemyMonSpecies
     level <- cpuRead gb wEnemyMonLevel
     dv1 <- cpuRead gb wEnemyMonAtkDefDV
