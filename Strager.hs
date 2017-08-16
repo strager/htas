@@ -35,6 +35,7 @@ import Control.Exception (bracket)
 import Control.Concurrent (getNumCapabilities)
 import Control.Concurrent.Async (asyncOn, wait)
 import Control.Concurrent.STM.Stats (dumpSTMStats, trackNamedSTM)
+import qualified Data.Foldable (foldr1)
 
 import HTas.Direct
 import HTas.Low
@@ -93,23 +94,23 @@ for = flip map
 
 main :: IO ()
 main = do
-    baseSave <- BS.readFile "pokered_dugtrio3.sav"
+    baseSave <- BS.readFile "pokeyellow_mt_moon.sav"
 
     runSearch newGB redCheckpointer $ do
-        _frame <- asum $ for [0] $ \frame -> do
+        _frame <- asum $ for [0x30] $ \frame -> do
             gb <- getGameboy
             liftIO $ loadSaveData gb (setSaveFrames frame baseSave)
             liftIO $ reset gb
             liftIO $ doOptimalIntro gb
             checkpoint
-        dugtrio
+        mtMoon
     return ()
 
     where
     newGB :: IO GB 
     newGB = do
         gb <- create
-        loadRomFile gb "pokered.gbc"
+        loadRomFile gb "pokeyellow.gbc"
         return gb
 
 redCheckpointer :: GB -> IO RedCheckpoint
@@ -197,12 +198,12 @@ appendPaths (Paths paths) nextPaths
 pressAArbitrarily :: Int -> Paths -> Paths
 pressAArbitrarily maximumAPresses paths@(Paths xs)
     | maximumAPresses == 0 = paths
-    | otherwise = unionPaths paths aPaths
+    | otherwise = Paths (Map.map (pressAArbitrarily maximumAPresses) xs) `unionPaths` aPaths
     where
-    aPaths = Paths $ Map.mapKeysWith unionPaths (<> i_A) xs
+    aPaths = Paths $ Map.map (pressAArbitrarily (maximumAPresses - 1)) $ Map.mapKeysWith unionPaths (<> i_A) xs
 
-dugtrio :: Search ()
-dugtrio = do
+mtMoon :: Search ()
+mtMoon = do
     -- TODO(strager): Prune if we're not at the expected
     -- location.
 
@@ -213,7 +214,7 @@ dugtrio = do
             liftIO $ bufferedStep gb inputRef input
             bonked <- liftIO $ (== 0xB4) <$> cpuRead gb 0xC02A
             when bonked $ prune
-            unless (input `hasAllInput` i_A) checkpoint
+            -- unless (input `hasAllInput` i_A) checkpoint
             return input
 
     -- HACK(strager): We let bonk pruning abort bad paths.
@@ -222,46 +223,22 @@ dugtrio = do
     let runPath :: Input -> Paths -> Search [Input]
         runPath input nextPaths = (:) <$> tryStep input <*> runPaths nextPaths
         runPaths :: Paths -> Search [Input]
-        runPaths (Paths paths) = Map.foldr (<|>) (return []) $ Map.mapWithKey runPath paths
+        runPaths (Paths paths) = if Map.null paths
+            then return []
+            else Data.Foldable.foldr1 (<|>) $ Map.mapWithKey runPath paths
 
-    segment1Steps <- runPaths $ pressAArbitrarily 2 $ foldr1 unionPaths
-        [ pathsBetween canStep (Pos 0 0) (Pos 21 (-1))
-        , pathsBetween canStep (Pos 0 0) (Pos 15 1) `appendPaths` pathsBetween canStep (Pos 15 1) (Pos 21 (-1))
-        ]
-    expectMap diglettCaveEntranceBMap
-    let segment1Path = segment1Steps
+    segment1Path <- runPaths $
+        pressAArbitrarily 2 (pathsBetween canStep (Pos 14 35) (Pos 14 22) `appendPaths` pathsBetween canStep (Pos 14 22) (Pos 20 22))
 
-    let segment2Path = []
-    let segment3Path = []
+    do
+        gb <- getGameboy
+        encountered <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
+        when encountered prune
+        location <- liftIO $ getLocation gb
+        log $ printf "%s\n" (show location)
 
-    segment4Steps <- runPaths $ pressAArbitrarily 1 $ foldr1 unionPaths
-        [ pathsBetween canStep (Pos 0 0) (Pos 2 (-3))
-        , pathsBetween canStep (Pos 0 0) (Pos (-1) (-5)) `appendPaths` pathsBetween canStep (Pos (-1) (-5)) (Pos 2 (-3))
-        ]
-    expectMap diglettCaveMap
-    let segment4Path = segment4Steps
-
-    (segment5Path, encounter) <- do
-        let tryStepA input = tryStep input <|> tryStep (input <> i_A)
-        let loop depth = do
-                when (depth >= 6) prune
-                step <- tryStepA i_Up <|> tryStepA i_Down <|> tryStepA i_Left
-                expectMap diglettCaveMap
-                gb <- getGameboy
-                encountered <- liftIO $ (/= 0) <$> cpuRead gb wIsInBattle
-                if encountered
-                then do
-                    encounter <- liftIO $ readEncounter gb
-                    unless (species encounter == 118 && level encounter == 31) prune
-                    return ([step], encounter)
-                else do
-                    (path, encounter) <- loop (depth + 1)
-                    return (step : path, encounter)
-        loop (1 :: Int)
-    checkpoint
-
-    let paths = [segment1Path, segment2Path, segment3Path, segment4Path, segment5Path]
-    log $ printf "Found encounter: %s\n%s" (show encounter)
+    let paths = [segment1Path]
+    log $ printf "Found path:\n%s"
         $ concat (map (\path -> printf " - %s\n" (show path) :: String) paths)
 
 data Search a where

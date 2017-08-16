@@ -7,16 +7,16 @@ import Data.Word
 import HTas.Low
 import HTas.Direct (GB)
 
-wYCoord = 0xD361
-wXCoord = 0xD362
+wYCoord = 0xD360
+wXCoord = 0xD361
 
-wCurMap = 0xD35E
+wCurMap = 0xD35D
 
-wWalkCounter = 0xCFC5
+wWalkCounter = 0xCFC4
 
-wIsInBattle = 0xD057
+wIsInBattle = 0xD056
 
-hJoyPressed = 0xFFB2
+hJoyPressed = 0xFFB3
 
 data Location = Location
     { locMap :: Word8
