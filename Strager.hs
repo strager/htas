@@ -97,13 +97,54 @@ main = do
     baseSave <- BS.readFile "pokeyellow_mt_moon.sav"
 
     runSearch newGB redCheckpointer $ do
-        _frame <- asum $ for [0x30] $ \frame -> do
+        setups <- do
             gb <- getGameboy
-            liftIO $ loadSaveData gb (setSaveFrames frame baseSave)
-            liftIO $ reset gb
-            liftIO $ doOptimalIntro gb
-            checkpoint
-        mtMoon
+            forM [0x00, 0x03, 0x10, 0x18, 0x20, 0x21, 0x22, 0x30] $ \frame -> liftIO $ do
+                loadSaveData gb (setSaveFrames frame baseSave)
+                reset gb
+                doOptimalIntro gb
+                saveState gb
+        log "Made setups\n"
+
+        -- Search with an arbitrary setup.
+        do
+            gb <- getGameboy
+            liftIO $ loadState gb (head setups)
+
+        path <- mtMoon
+
+        workingSetups <- flip filterM setups $ \setup -> do
+            gb <- getGameboy
+
+            liftIO $ do
+                loadState gb setup
+                inputRef <- newIORef mempty
+                setInputGetter gb (readIORef inputRef)
+                bufferedWalk gb inputRef path
+                writeIORef inputRef mempty
+                loc <- getLocation gb
+                let waitForEncounter c
+                        | c == 0 = return Nothing
+                        | otherwise = do
+                            encounter <- (/= 0) <$> cpuRead gb wIsInBattle
+                            if encounter
+                            then Just <$> readEncounter gb
+                            else do
+                                advanceFrame gb
+                                waitForEncounter (c - 1)
+                enc <- waitForEncounter 120
+                case enc of
+                    Nothing -> return True
+                    Just _ -> return False
+
+        when (length workingSetups < 2) prune
+
+        log $ printf "Found path (%d/%d IGT) (%d A-s): %s\n"
+            (length workingSetups)
+            (length setups)
+            (length $ filter (\i -> i `hasAllInput` i_A) path)
+            (show path)
+
     return ()
 
     where
@@ -209,7 +250,7 @@ pressAArbitrarily maximumAPresses paths@(Paths xs)
     where
     aPaths = Paths $ Map.map (pressAArbitrarily (maximumAPresses - 1)) $ Map.mapKeysWith unionPaths (<> i_A) xs
 
-mtMoon :: Search ()
+mtMoon :: Search [Input]
 mtMoon = do
     -- TODO(strager): Prune if we're not at the expected
     -- location.
@@ -275,8 +316,11 @@ mtMoon = do
     waitForEncounter 120
 
     let paths = [segment1Path, segment2Path, segment3Path, segment4Path, segment5Path, segment6Path, segment7Path, segment8Path]
+    return $ concat paths
+    {-
     log $ printf "Found path (%d A-s):\n%s" (sum $ map (length . filter (\p -> p `hasAllInput` i_A)) paths)
         $ concat (map (\path -> printf " - %s\n" (show path) :: String) paths)
+    -}
 
 data Search a where
     Alternative :: Search a -> Search a -> (a -> Search b) -> Search b

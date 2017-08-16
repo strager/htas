@@ -55,6 +55,8 @@ fbeeNidoManip gb inputRef = do
     clearTraceCallback gb
 
     bufferedWalk gb inputRef $ concat
+        [ [i_Up,i_Up<>i_A,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Up,i_Up<>i_A,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Up<>i_A,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Left,i_Left,i_Left,i_Down,i_Down,i_Down,i_Down,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Down,i_Down,i_Down<>i_A,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Left,i_Up,i_Up,i_Up,i_Left,i_Left,i_Left,i_Down<>i_A,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Up,i_Up<>i_A,i_Right,i_Up,i_Right,i_Right,i_Right,i_Right,i_Down,i_Down,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Up,i_Right,i_Up,i_Right,i_Right,i_Right,i_Down,i_Down<>i_A,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Left,i_Left,i_Down,i_Down,i_Down,i_Down,i_Left,i_Left,i_Down,i_Down,i_Down,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Right,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up] ]
+{-
         [ [i_Up,i_Up<>i_A,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right]
         , [i_Up<>i_A,i_Right,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right,i_Right]
         , [i_Up,i_Up,i_Up,i_Up<>i_A,i_Up,i_Up,i_Up,i_Left,i_Left,i_Left,i_Left,i_Down,i_Down,i_Down,i_Down,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Down]
@@ -64,6 +66,7 @@ fbeeNidoManip gb inputRef = do
         , [i_Down<>i_A,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Left,i_Left,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Down,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left,i_Left]
         , [i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Right,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up,i_Up]
         ]
+-}
     writeIORef inputRef mempty
 
     loc <- getLocation gb
